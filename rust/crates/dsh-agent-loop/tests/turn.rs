@@ -8,9 +8,7 @@ use dsh_provider::{
     text_response, tool_call_response, user_message, EchoProvider, LlmResponse, ScriptedProvider,
 };
 use dsh_session::{CoreEvent, RequestContext, Session, SessionId, SessionMeta};
-use dsh_tools::{
-    CancelSignal, ToolCallInput, ToolExecutionResult, ToolHandler, ToolRegistry, ToolScheduleConfig,
-};
+use dsh_tools::{CancelSignal, ToolCallInput, ToolExecutionResult, ToolHandler, ToolRegistry};
 
 /// A tool that echoes its `text` argument.
 struct EchoTool;
@@ -282,8 +280,7 @@ async fn the_step_limit_guards_a_model_that_never_stops() {
     let mut driver =
         AgentLoop::new(&mut session, &provider, &registry, route()).with_config(LoopConfig {
             max_steps: 3,
-            tool_schedule: ToolScheduleConfig::default(),
-            retry: None,
+            ..LoopConfig::default()
         });
 
     let report = driver.run_turn().await.unwrap();

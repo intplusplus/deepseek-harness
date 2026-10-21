@@ -2,11 +2,11 @@
 //! loop may call at a step boundary.
 //!
 //! [`compact`] is pure and testable: it takes the current durable log (a
-//! `&[SessionEvent]`), runs the full lifecycle — acquire the durable lock,
+//! `&[SessionEvent]`), runs the full lifecycle 鈥?acquire the durable lock,
 //! optionally prune over-budget tool results, summarize the selected region
 //! through a [`SummarizationBackend`], and emit the `compaction/start`,
 //! `compaction/prune`/`tool/result`, `compaction/summary`, checkpoint
-//! `user/message`, and `compaction/end` events — and returns the new events for
+//! `user/message`, and `compaction/end` events 鈥?and returns the new events for
 //! the host to append. No log is mutated here.
 //!
 //! The agent-loop integration is a pure policy decision, [`should_compact`]: a
@@ -110,11 +110,11 @@ pub async fn compact(
         let surface = fold_surface(&working)?;
         let plan: PrunePlan = plan_prune_session(&surface, &working, prune_config)?;
         for decision in plan.decisions {
-            let original = working
-                .get(decision.original_seq.get() as usize)
-                .ok_or_else(|| CompactionError::RangeStartNotFound {
+            let original = working.get(decision.original_seq.get() as usize).ok_or(
+                CompactionError::RangeStartNotFound {
                     start: decision.original_seq,
-                })?;
+                },
+            )?;
             let (orig_turn, orig_step) = match original {
                 SessionEvent::Core(CoreEvent::ToolResult { turn, step, .. }) => (*turn, *step),
                 _ => {
@@ -135,11 +135,11 @@ pub async fn compact(
 
     let surface = fold_surface(&working)?;
     let prices = estimate_surface_prices(&working, &surface);
-    let range = select_compactable_range(&surface.nodes(), &prices, options.retain_tokens)?;
+    let range = select_compactable_range(surface.nodes(), &prices, options.retain_tokens)?;
     let Some(range) = range else {
         return Ok(None);
     };
-    let region = validate_surface_region(&surface.nodes(), range.start, range.end)?;
+    let region = validate_surface_region(surface.nodes(), range.start, range.end)?;
 
     let input = build_summarization_input(&working, &surface, &region.shadowed_seqs)?;
     let result: SummaryResult = backend

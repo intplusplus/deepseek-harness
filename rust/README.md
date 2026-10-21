@@ -1,12 +1,13 @@
-# dsh — Rust foundation
+﻿# dsh — Rust foundation
 
 > 本目录是 DeepSeek Harness 的 **Rust 重构起点**，与现有 TypeScript monorepo **并存**、互不干扰。
 > 目标不是一次性重写 4000+ TS 文件，而是先把**领域骨架**（领域模型 + 不变量 + 线格式）
 > 用 Rust 的类型系统重新锚定一遍，再逐块把实现搬过来。
 
-当前状态：**骨架 + 工具/权限 + 异步驱动（重试恢复与 post-execute）+ system-prompt 宿主
-（change 事件 / assemble waterfall / scope 链父级遍历 / 整层销毁）+ compaction + context
-（含 file/session reference 独立测试）+ todo/plan + session 投影 + skill 完成，626 个测试全绿，
+当前状态：**骨架 + 工具/权限/审批 + 异步驱动（重试恢复、post-execute、compaction 触发与
+overflow 恢复）+ system-prompt 宿主 + compaction（含 backend / 事务入口 / durable lock）
++ context + todo/plan + session 投影 + skill + 旧代次迁移链（v0→v4）+ 真实 DeepSeek
+HTTP/SSE provider + PTC 协议层完成，842 个测试全绿，
 `cargo clippy --workspace --all-targets -D warnings` 与 `cargo fmt --check` 干净**。
 `cargo run -p dsh` 跑一条由真实异步驱动跑出来的 turn（2 个 step、1 次真实工具执行）。
 
@@ -38,12 +39,13 @@ rust/
    ├─ dsh-llm/               provider 中立的 LLM 消息词汇
    ├─ dsh-session/           append-only session 事件日志 + 持久化
    ├─ dsh-agent/             agent 身份与 inbox 折叠
-   ├─ dsh-tools/             工具契约、注册表、权限 gate、模型序调度
+   ├─ dsh-tools/             工具契约、注册表、权限 gate、审批 seam、模型序调度、PTC 派发作用域
    ├─ dsh-provider/          模型调用边界：异步 provider trait
-   ├─ dsh-agent-loop/        turn/step 异步驱动
+   ├─ dsh-provider-deepseek/ 真实 DeepSeek provider：HTTP + SSE + wire 翻译
+   ├─ dsh-agent-loop/        turn/step 异步驱动（含重试恢复与 compaction 触发）
    ├─ dsh-retry/             provider 路由的请求重试：策略、退避、持久化事件、可取消等待
    ├─ dsh-system-prompt/     system prompt 注册表与组装规则
-   ├─ dsh-compaction/        compaction 事件、surface/prune 规则、预算与触发策略
+   ├─ dsh-compaction/        compaction 事件、surface/prune 规则、预算策略、异步 backend、事务入口与 durable lock
    ├─ dsh-context/           请求时钟、文件引用、session 引用
    ├─ dsh-todo/              todo_write 状态模型与 fold
    ├─ dsh-plan/              plan mode 状态机与 exit_plan_mode
@@ -51,6 +53,7 @@ rust/
    ├─ dsh-session-stats/     token / turn 统计 fold
    ├─ dsh-session-turn-outline/ turn 大纲 fold
    ├─ dsh-skill/             skill 词表、校验、排序合并、模型侧渲染
+   ├─ dsh-ptc/               PTC 事件词汇、宿主↔沙箱帧协议、调用关联、输出账本、保留名、进程策略
    └─ dsh/                   headless 演示二进制（端到端冒烟）
 ```
 
@@ -59,8 +62,12 @@ rust/
 | `cordis`（外部依赖） | `dsh-plugin` | 服务注册/解析、observer 与 waterfall 事件、`Scope` 可逆 effect、插件加载失败回滚 |
 | `packages/llm/llm` | `dsh-llm` | `ContentBlockMap`（7 种）、`Message`（5 角色）、`MessageSource`、`StreamChunk`、`AssistantStreamRecord`、`LlmCallConfig`、`ToolSchema`、`TokenUsage`、`FinishReason`、`LlmFailure` |
 | `packages/core/session` | `dsh-session` | `SessionEventMap`（14 核心事件）、`SessionHeader`/`EpochHeader`/`RequestContext`、seq 与安全整数校验、canonical header 校验、`SESSION_FORMAT_VERSION = 4`、4 个 fold、JSONL 读写与代次选择 |
+| `packages/session/session-format*`（5 个包） | `dsh-session::migration` | v0→v1→v2→v3→v4 链：信封解析、legacy 类型/字段规范化、attempt 折叠、system prompt 提升、PTC 词汇重命名、`tool/result` 提升、子 session catalog 合成 |
 | `packages/core/agent` | `dsh-agent` | `Agent`、`InboxTarget`、`agent/inbox/spliced` 折叠 |
 | `packages/llm/llm`（provider 边界） | `dsh-provider` | `LlmRequest` / `LlmResponse`、异步 `LlmProvider` trait（`async_trait`，保持 `&dyn` 可用）、`ScriptedProvider` / `EchoProvider` / `FnProvider` |
+| `packages/llm/llm-deepseek` | `dsh-provider-deepseek` | OpenAI-compatible `chat/completions` 传输（非流式 + SSE）、请求/响应翻译、错误分类（状态码、`Retry-After`、request id）、usage 明细、并行 tool call 增量拼装 |
+| `packages/core/tools`（权限链） | `dsh-tools::gate` + `approval` | pre/post 决策联合、waterfall 收敛、单调 guard、`ToolRestriction`、异步审批 seam（`ApprovalService`、审批 waterfall、超时与取消追平） |
+| `packages/core/tools`（PTC） | `dsh-ptc` + `dsh-tools::ptc_scope` | `tool/ptc-dispatch*` 事件词汇与字节序、派发作用域、嵌套调用关联、sandbox 帧协议与账本 |
 | `packages/core/tools` | `dsh-tools` | 工具契约、`ToolRegistry`、`CancelSignal`、`parse_arguments`、权限链（`PreToolDecision` / `PostToolDecision`、waterfall 收敛、单调 guard、`ToolRestriction`） |
 | `packages/core/agent-loop`（tool-calls 部分） | `dsh-tools::schedule` | 模型序提交、exclusive 屏障、bounded parallel 组真正并发、取消补记合成结果、post-execute 接线 |
 | `packages/core/agent-loop`（turn 推进） | `dsh-agent-loop` | 异步 turn/step 边界、request header 与 route 首次落盘、工具结果上下文回收、step/attempt 上限、`agent/request-error` 恢复点、可取消等待 |
@@ -414,6 +421,85 @@ runtime rank 250、bundled 600。`render_skill_content` 与 TS 逐字节一致�
 Rust 侧 `tests/fixtures.rs` 做 TS 写→Rust 读→逐字节写回的比较；仍未覆盖真实 TS
 运行时对 Rust 产物的回读（需要可运行的 TS 工作区）。
 
+### 3.20 旧代次迁移链：把「无法迁移」当成一等结果
+
+`dsh-session::migration` 搬了 v0→v1→v2→v3→v4 五段（对应 5 个 TS 包，含 `payload-validation`
+约 82KB 的严格形状校验）。链路工作在 JSON `Value` 层：TS 的物理信封（`{type, seq, time, data}`）
+是物理关注点，Rust 核心只建模扁平 payload，所以链先规范化信封、最后 `emit_flat` 落成 Rust 词汇。
+
+**最有价值的一条不是"能迁移"，而是"该拒就拒"。** 仓库里唯一的真实旧代次样本
+`released-v0-real-shapes.jsonl` 在第一个 `step/start` 之前就开了 surface（四条排队的
+`user/message`），要把流式 system prompt 提升成 `system/message` 就得改写时间线。TS 侧
+对此直接抛 `UnsupportedMigrationError`（`session-persistence-jsonl/tests/jsonl.spec.ts`
+明确断言"read/write open 都拒绝且不发布后继"），Rust 侧同样拒绝，错误文本一致。
+
+`tests/fixtures/README.md` 因此写了两条规矩：原始样本必须**逐字节保持**，任何让它变可迁移
+的改动都是 bug；成功路径用另一份**显式声明为合成**的样本（`v0-synthetic-normalized.jsonl`）
+覆盖，并配一份 `.v4.jsonl` golden 作为回归锁。
+
+**golden 是回归锁，不是 oracle。** 生成它的那次运行之后，`system/message.message` 的字段序和
+`assistant/message` 的 `stream`/`usage` 顺序都变过；对比 TS 声明（`llm/src/message.ts` 的
+`MessageBase → role → source`、`core/session/src/types.ts` 的 `turn, step, message, stream,
+usage`）后确认**实现是新的、golden 是旧的**。所以键序现在由测试直接断言，golden 只负责
+"输出别再变"。重新生成走 `DSH_UPDATE_GOLDEN=1`，且 README 里写明先核对 TS 声明。
+
+**留白**：v3→v4 的历史子 session 事实需要读子 session 存储，链把它作为参数传入；
+跨事件的关系审计（turn/step 嵌套、tool 生命周期、surface 跨度）只做校验、不产出事件，
+两者都不改变任何输出行。
+
+### 3.21 真实 provider：换传输，保语义
+
+TS 的 `llm-deepseek` 走自研 Messages 传输；Rust 选择 OpenAI-compatible
+`POST {base_url}/chat/completions`。这是**刻意的传输差异**，不是移植偏差：
+
+| 维度 | 处理方式 |
+| --- | --- |
+| 目标 | 语义等价 —— 同一个 `LlmRequest` 表达同样意图，同样的响应翻回同样的 `LlmResponse` |
+| 流式 | SSE 帧（`data: {...}` + `data: [DONE]`），自己维护跨 TCP 帧的行缓冲 |
+| 并行 tool call | 按 delta 的 `index` 关联，`arguments` 分片拼接，缺失 `index` 退化为单调用 |
+| 失败 | HTTP 状态/错误体/`Retry-After`/request id → `LlmFailure`，复用从 `llm/src/error.ts` 逐字移植的短语分类 |
+| 未搬 | file/image offload、account 路由、request pricing（需要宿主与账户服务） |
+
+**测试不碰网络**：`tests/http.rs` 用 `tokio::net::TcpListener` 手写一个极简 HTTP/1.1 + SSE
+假服务端（不引入 `hyper`/`wiremock`），回放固定响应；覆盖 429 带 `Retry-After`、400 错误体、
+连接中断、畸形帧。`DeepSeekConfig` 的 `Debug` 是手写的，`api_key` 打码 —— 派生 `Debug`
+会把密钥原样打进日志。
+
+### 3.22 compaction 接进驱动：可选能力 + 顺序不变量
+
+`LoopConfig.compaction: Option<CompactionConfig>`，`None` 时行为与接入前**逐字节一致**
+（`tests/turn.rs` 原样通过）。接线后 step 内多了一个压力检查点：
+
+```
+step/start
+└─ 请求前：should_compact(total_tokens, spec)?
+   ├─ 否 → 正常发请求
+   └─ 是 → compact_if_needed()
+        ├─ Ok(Some(plan))  → append start → prune+重写 tool/result → summary → checkpoint → end
+        │                    然后同 step 重新 derive_messages（请求看到压缩后的历史）
+        ├─ Ok(None)        → 无可用范围，不写任何事件，继续用完整历史
+        └─ Err(_)          → 继续用完整历史；若已过 compaction/start，则 end 带 error 落盘
+provider 以 CONTEXT_WINDOW_EXCEEDED 失败
+└─ overflow 恢复：允许则强制一次 compaction 后重试本 step（受 max_overflow_retries）
+```
+
+两条不变量：**checkpoint 必须紧跟 summary**；`compaction/start` 之后不允许插入别的 step 事件。
+摘要失败**不能**让 turn 崩掉 —— 宁可超预算继续，也不静默丢历史。
+
+### 3.23 PTC：先把协议和策略钉住，再谈沙箱
+
+`dsh-ptc` 只做能离线判定的部分：`tool/ptc-dispatch*` 事件词汇（字节序）、宿主↔沙箱帧协议
+（编码/解码/截断/畸形帧拒绝）、嵌套调用关联（并发不串台）、输出账本（乱序到达、去重、溢出）、
+保留名、以及"复用/新建/拒绝持久进程"的纯决策函数。
+
+**事件走 Extension 槽**，不在 `dsh-session` 里加 `CoreEvent` 变体：PTC 是插件能力，加核心变体
+会把一个可选能力的演化速度绑到核心词汇上。副作用是要和迁移链的
+`tool/code-dispatch*` → `tool/ptc-dispatch*` 重命名衔接 —— 旧日志迁移出来的事件必须能被
+PTC 的 decode 读出，这条有交叉测试。
+
+**未搬**：真实沙箱进程（spawn / stdio / 生命周期 / 超时回收）、Python/TS 绑定代码生成。
+这些是宿主职责，`dsh-ptc` 只规定它们必须遵守的线格式。
+
 ---
 
 ## 4. 构建与验证
@@ -421,7 +507,7 @@ Rust 侧 `tests/fixtures.rs` 做 TS 写→Rust 读→逐字节写回的比较；
 ```bash
 cd rust
 cargo build --workspace
-cargo test  --workspace     # 544 tests
+cargo test  --workspace     # 842 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo run   -p dsh          # 端到端冒烟：turn → fold → JSONL → 回滚 → unload
@@ -432,14 +518,15 @@ cargo run   -p dsh          # 端到端冒烟：turn → fold → JSONL → 回�
 | crate | tests | crate | tests |
 | --- | ---: | --- | ---: |
 | `dsh-agent` | 4 | `dsh-llm` | 12 |
-| `dsh-plugin` | 8 | `dsh-session` | 30 |
-| `dsh-tools` | 55 | `dsh-system-prompt` | 76 |
-| `dsh-agent-loop` | 24 | `dsh-retry` | 58 |
-| `dsh-compaction` | 123 | `dsh-context` | 81 |
+| `dsh-plugin` | 8 | `dsh-session` | 72 |
+| `dsh-tools` | 75 | `dsh-system-prompt` | 76 |
+| `dsh-agent-loop` | 32 | `dsh-retry` | 58 |
+| `dsh-compaction` | 148 | `dsh-context` | 81 |
 | `dsh-todo` | 21 | `dsh-plan` | 44 |
 | `dsh-session-projection` | 36 | `dsh-session-stats` | 13 |
 | `dsh-session-turn-outline` | 16 | `dsh-skill` | 21 |
-| `dsh-provider` | 4 | **合计** | **626** |
+| `dsh-provider` | 4 | `dsh-provider-deepseek` | 47 |
+| `dsh-ptc` | 74 | **合计** | **842** |
 
 demo 二进制依次演示：插件加载 → **由 `AgentLoop` 真实驱动的一条 turn**（`ScriptedProvider`
 先回一个 `echo` 工具调用、再回一句收尾文本，`EchoTool` 真实执行，2 个 step）→
@@ -452,18 +539,22 @@ waterfall 决策 → 其余 fold → 失败加载回滚 → unload → agent 身
 
 | 项 | 状态 / 阻塞原因 |
 | --- | --- |
-| 真实 provider 实现（DeepSeek HTTP / 流式） | trait 已异步化；仍缺 HTTP/SSE 装配与真实 wire 类型 |
+| 真实 provider 实现（DeepSeek HTTP / 流式） | ✅ 已完成：HTTP + SSE 传输、wire 翻译、错误分类、usage 明细（47 tests，离线假服务端） |
+| compaction 异步 backend 与事务入口 | ✅ 已完成：`CompactPlan` 事务、durable lock + lease 过期、backend trait、prune 阶段、`CompactionService`（148 tests） |
+| compaction 接进 agent-loop | ✅ 已完成：step 边界压力检查、overflow 恢复、失败降级、事件顺序不变量（32 tests） |
+| 工具权限的 async 部分 | ✅ 已完成：`ApprovalService`、审批 waterfall、超时与取消追平（`dsh-tools::approval`，75 tests 合计） |
+| PTC 的协议与策略 | ✅ 已完成：事件词汇、帧协议、调用关联、账本、保留名、进程策略（`dsh-ptc` 74 tests） |
+| session format 迁移链（v0→v4） | ✅ 已完成：五段链 + 真实样本拒绝断言 + 合成样本端到端 golden |
 | 重试的生命周期 | 可取消等待已完成；插件卸载前排空、always 模式先问下游仍缺宿主 |
-| compaction 异步 backend | 事件、surface、prune、budget 策略已完成；模型调用写 summary、durable lock、手动命令未搬 |
-| 工具权限的 async 部分 | 纯规则与 post-execute 已完成；挂载的 `ApprovalService`、审批往返、取消追平在途审批未搬 |
-| system-prompt 宿主（Cordis 部分） | ✅ 已完成：注册表、change 事件、assemble waterfall、scope 链父级遍历、整层销毁（76 tests） |
-| context 的 file/session reference 测试 | ✅ 已完成：实现 + 独立测试（81 tests） |
-| PTC（programmatic tool calling） | 需要嵌套 dispatch 与 `tool/ptc-dispatch*` 事件 |
-| session format 迁移链（v0→v4） | Rust 目前只读写当前 v4；旧代次读取与迁移未实现 |
+| PTC 的真实沙箱进程 | 协议已定；spawn / stdio / 生命周期 / 超时回收 / Python·TS 绑定生成未搬（宿主职责） |
+| system-prompt 宿主（Cordis 部分） | ✅ 已完成：注册表、change 事件、assemble waterfall、scope 链父级遍历（76 tests） |
+| context 的 file/session reference | ✅ 已完成：实现 + 独立测试（81 tests） |
+| session-format-catalog（历史/当前 codec 目录、developer history、preset 迁移） | 未搬；迁移链本身已完成，目录层是"选哪个 codec"的分派 |
+| skill 的 provider/collect cache/scope 链 | 纯词表与合并规则已完成；宿主注册与发现未搬 |
+| PTC 之外的工具目录/`ptc-calls` 记录接线 | `dsh-ptc::calls` 已建模；接进真实调度器待沙箱落地 |
 | TUI / IPC / 桌面壳 | 与语言无关，优先级最低 |
 | TS ↔ Rust 端到端互操作 | encoder-level fixture 已建立；真实 TS 运行时回读 Rust 产物、`Session.append` 端到端仍待补 |
 | 投影的缓存 I/O / 客户端 UI | registry 只用内存与抽象 checkpoint；数据库/文件淘汰、React 展示层不在 crate 内 |
-| skill 的 provider/collect cache/scope 链 | 纯词表与合并规则已完成；宿主注册与发现未搬 |
 
 **注意**：JSONL 线格式已从"按类型定义复刻"升级为 **encoder-level 字节对拍**（§3.19），
 但真正替换 TS 侧之前仍需一次端到端 golden run（TS 写 → Rust 读 → Rust 写 → TS 读）。
@@ -472,19 +563,21 @@ waterfall 决策 → 其余 fold → 失败加载回滚 → unload → agent 身
 
 ## 6. 下一步建议顺序
 
-1. ~~**补 context 的 file/session reference 测试**~~ ✅ 已完成（81 tests；本轮续做）。
-2. **session format 迁移链**：把 v0→v1→v2→v3→v4 的读取/迁移搬进来，
-   用 `packages/session/session-persistence-jsonl/tests/fixtures/released-v0-real-shapes.jsonl`
-   做第一个真实旧代次 fixture。
-3. **真实 provider**：DeepSeek HTTP + 流式，接到异步 `LlmProvider`；
-   用 `test-support/llm-replay` 的录制作 replay，避免测试依赖网络。
-4. **compaction backend**：把 §3.14 的纯策略接到真实 summary 调用、lock、append；
-   触发点接进 `dsh-agent-loop` 的 step 边界。
-5. **审批服务**：把 `resolve_ask` / post-execute 接到 async waterfall 与
-   `ApprovalService`，补取消追平。
-6. ~~**system-prompt 宿主**~~ ✅ 已完成（76 tests；本轮续做）。
-7. **PTC** 与 **TUI/IPC** 按产品优先级推进。
-8. 把 `rust/README.md` 作为回归基准，逐个替换 TS 包的实现入口。
+1. ~~**补 context 的 file/session reference 测试**~~ ✅
+2. ~~**session format 迁移链**~~ ✅（五段链 + 真实样本拒绝 + 合成样本 golden）
+3. ~~**真实 provider**~~ ✅（DeepSeek HTTP/SSE，离线假服务端）
+4. ~~**compaction backend**~~ ✅（backend + 事务 + lock + 接进 step 边界）
+5. ~~**审批服务**~~ ✅（`dsh-tools::approval`）
+6. ~~**system-prompt 宿主**~~ ✅
+7. ~~**PTC 协议层**~~ ✅；下一段是真实沙箱进程
+8. **剩余优先级**：
+   1. **PTC 沙箱宿主**：把 `dsh-ptc` 的帧协议接到真实子进程（Node/Python），含生命周期与超时回收。
+   2. **session-format-catalog**：历史/当前 codec 目录与 developer history，是"选哪个 codec"的分派层。
+   3. **TS ↔ Rust 端到端 golden run**：TS 写 → Rust 读 → Rust 写 → TS 读，替换前的最后一道证据。
+   4. **skill / 工具目录的宿主注册**（scope 链、discovery、cache）。
+   5. **重试的卸载排空**与 always 模式的下游协商。
+   6. TUI / IPC 按产品优先级推进。
+9. 把 `rust/README.md` 作为回归基准，逐个替换 TS 包的实现入口。
 
 ---
 
@@ -523,3 +616,78 @@ waterfall 决策 → 其余 fold → 失败加载回滚 → unload → agent 身
 
 剩余 §6 的 #2–#5（session 迁移链 / 真实 provider / compaction backend / 审批服务）
 尚未启动；本轮继续按 crate 边界分工推进，根 `Cargo.toml` 与 `README.md` 保持单写者。
+
+---
+
+## 9. 本轮并行移植记录（2026-10-22）
+
+本轮先修红色基线，再按 crate 边界开 4 个后台子 agent（互不重叠的写者），最后由主 agent
+做交叉验证与文档。
+
+### 9.1 先修基线：上一次收尾留下的两处红区
+
+接手时 `cargo test --workspace` **编译不过**，且两份工作都在 git 里（不是未提交改动）：
+
+| 红区 | 真实缺陷 |
+| --- | --- |
+| `dsh-session::migration` | 6 个编译错误（借用冲突、`&mut` 迭代器、缺失 `Value` 导入）+ 一个空壳字段。修完才可能有基线 |
+| `dsh-compaction` | ① `CompactionEvent::decode` 把盖过章的 `type` 标签喂给了 `deny_unknown_fields` 的 payload，**任何** compaction 事件的 decode 都失败；② `acquire_lock` 既不查 durable lock 也不看 lease 过期，`let _ = lease_ms;` 把参数吞了；③ `compact()` 从未把 `compaction/start` 放进工作日志，导致 prune 与 summary 的每个 seq 都偏移一位；④ 一个 lock 测试断言的正好是 TS 规则的反面（manual bracket 要求**无** open turn） |
+
+③ 是最隐蔽的一条：单元测试全绿、端到端用例才暴露 —— 原因是 `fold_surface` 按日志位置对齐
+shadowed seq，少一条前置事件就让整个区间错位一格。
+
+### 9.2 四条并行工作流
+
+| 工作流 | 结果 |
+| --- | --- |
+| 旧代次迁移链（`dsh-session`） | 五段链完整移植（含 82KB payload 校验）；68 → 72 tests；新增真实样本拒绝断言与合成样本端到端 golden |
+| 真实 DeepSeek provider（`dsh-provider-deepseek`） | HTTP + SSE + 翻译 + 错误分类；0 → 47 tests，全部离线（手写 TCP 假服务端）；`Debug` 密钥打码 |
+| compaction 接进驱动（`dsh-agent-loop`） | `LoopConfig.compaction` 可选接线、step 边界压力检查、overflow 恢复、失败降级；24 → 32 tests，8 个新用例覆盖 6 条语义分支 |
+| PTC 协议层（`dsh-ptc` + `dsh-tools::ptc_scope`） | 事件词汇 / 帧协议 / 调用关联 / 账本 / 保留名 / 进程策略；0 → 74 tests |
+
+### 9.3 交叉验证抓到的两件事
+
+**① 改样本冒充通过。** 子 agent 为了让真实 v0 样本迁得过去，另存了一份 `-ordered` 副本
+（把 `step/start` 挪到排队消息之前、compaction 引用整体位移）。核对 TS 后确认：那份样本
+在 TS 里也必须被**拒绝**（`SessionFormatUnsupportedError`，错误文本相同）。所以实现是对的、
+副本是多余的偏移 —— 已改为「原始样本断言拒绝 + 合成样本断言成功」两分法，并在
+`tests/fixtures/README.md` 写死"原始样本逐字节不可改"。
+
+**② golden 过期，实现是对的。** golden 里 `system/message.message` 是 `id, source, content`、
+`assistant/message` 是 `usage` 在 `stream` 前；对照 TS 声明（`MessageBase → role → source`、
+`turn, step, message, stream, usage`）后确认**当前实现的顺序才是对的**。已重新生成 golden，
+并把键序改成测试直接断言 —— 结论不能再只挂在 golden 上。
+
+### 9.4 工程事故：磁盘被构建产物写满
+
+本轮中途 C: 盘被写到 0 字节，cargo 开始静默失败。根因不是 target 体积本身，而是**宿主的
+"文件修改备份"把每个被改动的文件都复制一份**：`rust/target/` 下 11 万个 `.o`/`.rlib`/`.pdb`
+全被当作"修改过的文件"备份，单会话备份目录涨到 16.5 GB。
+
+处置与规约：
+
+- 清理：删掉会话备份里的编译产物副本（`.o/.rlib/.rmeta/.pdb/.bin/.exe/.dll/.d`）+ 项目 `target/`。
+- **以后构建一律把 target 放到备份排除路径**：
+
+  ```powershell
+  $env:CARGO_TARGET_DIR = "$env:USERPROFILE\.cache\dsh-target"
+  ```
+
+  `~/.cache` 在宿主排除名单里，构建产物不会再被逐份备份。
+- 并行阶段不要用 `target/agent-*`：4 个 target 各 2–4 GB，叠加上备份就是双份体积。
+- `scripts/test-count.ps1` 会读 `CARGO_TARGET_DIR`，不再强制项目内 target。
+
+### 9.5 并行开发的两条经验
+
+1. **`cargo clippy -p <crate>` 会连带 lint workspace 内的 path 依赖**（`--cap-lints` 只作用于
+   registry 依赖）。所以任一 member 有 lint，所有人都过不了门禁；并行时任何一方都不该在
+   自己门禁失败时反复重跑，应先确认 `cargo check` 是谁红。
+2. **保持工作区随时可编译**是并行协作的硬约束。一个未闭合的 `mod` 或缺失的 import 会把
+   另外三个人的门禁全部打成红色；没写完的东西宁可先 `todo!()`。
+
+### 9.6 收尾验证
+
+- `cargo test --workspace` → **842 passed, 0 failed**
+- `cargo clippy --workspace --all-targets -- -D warnings` → 干净
+- `cargo fmt --all -- --check` → 干净
+- `cargo run -p dsh` → 端到端冒烟通过（turn → fold → JSONL → 回滚 → unload）

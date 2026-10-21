@@ -1,0 +1,17 @@
+[package]
+name = "dsh-ptc"
+description = "PTC protocol frames, output accounting, dispatch policy, and durable tool/ptc-dispatch events ported from packages/ptc-runtime and packages/core/tools/src/ptc*.ts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dsh-llm = { workspace = true }
+dsh-session = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Turn/step driver over the session log, the provider, and the tool scheduler"
 
 [dependencies]
+dsh-compaction = { workspace = true }
 dsh-llm = { workspace = true }
 dsh-provider = { workspace = true }
 dsh-retry = { workspace = true }

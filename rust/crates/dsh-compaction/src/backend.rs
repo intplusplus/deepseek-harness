@@ -143,7 +143,7 @@ impl SummarizationBackend for LlmSummarizationBackend {
             .collect();
         if !summary
             .iter()
-            .any(|block| block.as_text().map(str::trim).unwrap_or("").len() > 0)
+            .any(|block| !block.as_text().map(str::trim).unwrap_or("").is_empty())
         {
             return Err(CompactionError::SummaryEmpty);
         }

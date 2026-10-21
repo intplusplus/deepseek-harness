@@ -13,6 +13,7 @@
 //!   user/message  (claimed input)
 //!   step/start
 //!     request/header, request/context   (when they change)
+//!     compaction/start, compaction/summary, user/message, compaction/end
 //!     llm/retry, llm/retry-started      (per failed attempt that recovers)
 //!     assistant/message                 (what the model said)
 //!     tool/call, tool/result            (scheduled in model order)
@@ -31,14 +32,25 @@
 //! provider, so a loop without retry behaves exactly as it did before. The
 //! retry wait is asynchronous and races the configured cancellation source.
 //!
+//! ## Compaction
+//!
+//! `dsh-compaction` owns the transaction; this crate owns the trigger points.
+//! With [`CompactionConfig`] installed, each step first measures the request its
+//! surface would produce (through the host's [`TokenMeter`]) and compacts when
+//! the routed threshold is crossed, and a canonical context-window overflow is
+//! offered one forced reduction before the step is retried. Both are optional:
+//! without a config the log carries no `compaction/*` events at all.
+//!
 //! ## Not ported
 //!
-//! System-prompt assembly, compaction, and the `agent/pre-step` waterfall are
-//! absent: they need the system-prompt subsystem. The step boundary where they
-//! hook is already present.
+//! System-prompt assembly and the `agent/pre-step` waterfall are absent: they
+//! need the system-prompt subsystem. The step boundary where they hook is
+//! already present.
 
 #![forbid(unsafe_code)]
 
 mod driver;
 
-pub use driver::{AgentLoop, LoopConfig, LoopError, TurnReport, DEFAULT_MAX_STEPS};
+pub use driver::{
+    AgentLoop, CompactionConfig, LoopConfig, LoopError, TokenMeter, TurnReport, DEFAULT_MAX_STEPS,
+};

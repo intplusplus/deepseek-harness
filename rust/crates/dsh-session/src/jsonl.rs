@@ -8,8 +8,8 @@
 //! renamed, replaced, or deleted.
 //!
 //! Generation selection is header-only: the numerically highest canonical
-//! generation wins, a future version is refused, and an older one requires the
-//! migration chain this foundation does not yet carry.
+//! generation wins, a future version is refused, and an older one is normalized
+//! by the migration chain in [`crate::migration`] before it is restored.
 
 #![forbid(unsafe_code)]
 
@@ -85,16 +85,14 @@ pub fn decode(text: &str) -> Result<Session, SessionError> {
     let header_line = lines.next().ok_or(SessionError::EmptyLog)?;
     let header_value: serde_json::Value =
         serde_json::from_str(header_line).map_err(|error| SessionError::Json(error.to_string()))?;
-    let is_physical = header_value.get("type").and_then(|value| value.as_str()) == Some("session");
-    let _ = is_physical;
     let version = migration::detect_version(&header_value).ok_or_else(|| {
         SessionError::Json("session header is missing a format version".to_string())
     })?;
 
     if version == SESSION_FORMAT_VERSION {
-        // Current generation: decode directly (works for both the Rust-native
-        // flat log and, by preserving the old rejection, a TypeScript-physical
-        // v4 envelope, which the Rust core does not model).
+        // Current generation: decode directly. The Rust-native flat log is the
+        // only current layout; a TypeScript-physical v4 envelope is rejected by
+        // the event decoder.
         return decode_current(&header_value, lines);
     }
     if version > SESSION_FORMAT_VERSION {
@@ -106,16 +104,8 @@ pub fn decode(text: &str) -> Result<Session, SessionError> {
 
     // Legacy generation: parse every line into an envelope, migrate to v4, then
     // restore through the usual admission path.
-    let mut envelopes = Vec::new();
-    let mut index = 0usize;
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        envelopes.push(migration::parse_event_line(line, index)?);
-        index += 1;
-    }
-    let (v4_header, flat_events) = migration::migrate_session(header_value, envelopes, &[])?;
+    let log = migration::Log::parse(text)?;
+    let (v4_header, flat_events) = migration::migrate_session(log, &[])?;
     let header: SessionHeader =
         serde_json::from_value(v4_header).map_err(|error| SessionError::Json(error.to_string()))?;
     let mut events = Vec::with_capacity(flat_events.len());

@@ -8,8 +8,13 @@
 //!
 //! All optional fields default to `None`/`0` so a partial stream frame never
 //! fails to deserialize; the translator decides what a missing field means.
-
+//!
+//! Not every declared field is read: a field stays here because the server
+//! sends it and the shape should say so (`id`, `model`, `role`, the tool-call
+//! `type` tag), not because the translator consults it. Deleting them would
+//! make this module a lossy description of the protocol.
 #![forbid(unsafe_code)]
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -22,6 +27,10 @@ pub(crate) struct WireRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<WireTool>>,
     pub stream: bool,
+    /// Asks the server to close a stream with a usage-only chunk. Without it a
+    /// streamed call reports no token accounting at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<WireStreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -32,9 +41,19 @@ pub(crate) struct WireRequest {
     pub stop: Option<Vec<String>>,
 }
 
+/// Stream options. `include_usage` makes the server append one chunk whose
+/// `choices` array is empty and whose `usage` object is complete.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct WireStreamOptions {
+    pub include_usage: bool,
+}
+
 /// One conversation message on the wire. `content` is a string for text roles
-/// and may be `null` when the assistant message carries only tool calls.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// and is omitted when the assistant message carries only tool calls.
+///
+/// Request-only: responses are read through [`WireMessageResponse`], whose tool
+/// calls are shaped differently (arguments are a string, not a request echo).
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct WireMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,11 +142,26 @@ pub(crate) struct WireToolCallResponse {
 }
 
 /// Function identity and raw JSON arguments of a model tool call.
+///
+/// `arguments` defaults to empty: a gateway that omits the field (or sends
+/// `null`, which serde maps onto the default for `String` only when the field
+/// is absent) must not fail the whole completion. An empty argument string is
+/// treated as `{}` by the translator.
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct WireToolCallResponseFunction {
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub arguments: String,
+}
+
+/// Read a string field that may be absent, `null`, or a string. OpenAI gateways
+/// emit all three for `arguments`.
+fn null_as_empty<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// Token accounting, present at the end of a stream or in a full response.
@@ -139,6 +173,13 @@ pub(crate) struct WireUsage {
     pub completion_tokens: u64,
     #[serde(default)]
     pub total_tokens: Option<u64>,
+    /// DeepSeek's native context-cache fields. They are the authoritative cache
+    /// split when present; `prompt_tokens_details.cached_tokens` is the
+    /// OpenAI-shaped fallback.
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<u64>,
+    #[serde(default)]
+    pub prompt_cache_miss_tokens: Option<u64>,
     #[serde(default)]
     pub prompt_tokens_details: Option<WireTokenDetails>,
     #[serde(default)]

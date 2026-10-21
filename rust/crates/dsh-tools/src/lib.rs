@@ -17,6 +17,7 @@
 pub mod approval;
 pub mod cancel;
 pub mod gate;
+pub mod ptc_scope;
 pub mod registry;
 pub mod schedule;
 pub mod types;
@@ -35,6 +36,7 @@ pub use gate::{
     ApprovalOutcome, DisplayReason, GateOutcome, PostToolDecision, PostToolError, PostToolGate,
     PreToolDecision, PreToolGate, PreToolVote, ResolvedAsk, RestrictionError, ToolRestriction,
 };
+pub use ptc_scope::{binding_names, collapses_to_run_code, DispatchScope, RUN_CODE_NAME};
 pub use registry::{ToolHandler, ToolRegistry};
 pub use schedule::{
     execute_tool_calls, execute_tool_calls_gated, execute_tool_calls_with_post_execute,

@@ -5,6 +5,21 @@
 //! The vocabulary is merge-extensible — the core owns the closed [`CoreEvent`]
 //! union, and plugins extend the log through the [`SessionEvent::Extension`]
 //! slot, mirroring the TypeScript declaration-merging design.
+//!
+//! # Historical formats
+//!
+//! [`jsonl::decode`] accepts the four released generations (`v0`–`v3`) and
+//! normalizes them to the current [`SESSION_FORMAT_VERSION`] through
+//! [`migration`]. The chain is a transcription of the TypeScript migration
+//! packages, with one deliberate gap: the v3→v4 edge takes historical child
+//! evidence as an argument instead of reading child sessions from storage, and
+//! cross-event *relationship* audits (turn/step nesting, tool lifecycles,
+//! surface spans) are not reproduced. Both are validation-only omissions and
+//! are documented on [`migration`]; no emitted event depends on them.
+//!
+//! Logs written by this crate are the flat Rust vocabulary, not the physical
+//! TypeScript envelope; a v4 log decodes directly, and a legacy physical log is
+//! migrated on read.
 
 #![forbid(unsafe_code)]
 
@@ -27,7 +42,7 @@ pub use jsonl::{
 pub use log::Session;
 pub use migration::{
     detect_version, migrate_session, parse_event_line, v0_to_v1, v1_to_v2, v2_to_v3, v3_to_v4,
-    Envelope,
+    Envelope, Log,
 };
 pub use types::{
     AgentCancelCause, EpochHeader, OptionalSessionSeq, RequestContext, RequestHeaderReason,
