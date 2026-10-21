@@ -68,7 +68,10 @@ impl Envelope {
 
 /// The format version stamped in a header value, if present.
 pub fn detect_version(header: &Value) -> Option<u32> {
-    header.get("version").and_then(Value::as_u64).map(|v| v as u32)
+    header
+        .get("version")
+        .and_then(Value::as_u64)
+        .map(|v| v as u32)
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +96,10 @@ fn as_object(value: &Value) -> Option<&Map<String, Value>> {
 
 fn as_object_mut(value: &mut Value) -> Option<&mut Map<String, Value>> {
     value.as_object_mut()
+}
+
+fn as_array_mut(value: &mut Value) -> Option<&mut Vec<Value>> {
+    value.as_array_mut()
 }
 
 fn str_of<'a>(map: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -221,25 +228,34 @@ fn set_version(header: &mut Value, version: u32) {
 /// State threaded through the v0 → v1 normalization.
 #[derive(Default)]
 struct V0State {
+    /// Message ids synthesized for legacy payloads. Reserved for the
+    /// relationship pass (`session-format-v0-to-v1/src/relationships.ts`),
+    /// which is not ported yet.
+    #[allow(dead_code)]
     message_ids: HashMap<u64, String>,
     retry_ids: HashMap<String, String>,
     compaction_id: Option<String>,
 }
 
 /// Promote a released v0 session into v1.
-pub fn v0_to_v1(header: &mut Value, envelopes: Vec<Envelope>) -> Result<Vec<Envelope>, SessionError> {
+pub fn v0_to_v1(
+    header: &mut Value,
+    envelopes: Vec<Envelope>,
+) -> Result<Vec<Envelope>, SessionError> {
     set_version(header, 1);
-    let session_id = str_of(
-        as_object(header).unwrap_or(&Map::new()),
-        "id",
-    )
-    .unwrap_or_default()
-    .to_string();
+    let session_id = str_of(as_object(header).unwrap_or(&Map::new()), "id")
+        .unwrap_or_default()
+        .to_string();
     let mut state = V0State::default();
     let mut out = Vec::with_capacity(envelopes.len());
     for envelope in envelopes {
-        let (r#type, data) =
-            normalize_v0_event(envelope.r#type, envelope.seq, envelope.data, &session_id, &mut state)?;
+        let (r#type, data) = normalize_v0_event(
+            envelope.r#type,
+            envelope.seq,
+            envelope.data,
+            &session_id,
+            &mut state,
+        )?;
         let mut migrated = Envelope::new(r#type, data);
         migrated.seq = envelope.seq;
         migrated.time = envelope.time;
@@ -284,7 +300,10 @@ fn rename_compaction_type(r#type: &str) -> String {
     .to_string()
 }
 
-fn assert_supported_legacy_type(r#type: &str, data: &Map<String, Value>) -> Result<(), SessionError> {
+fn assert_supported_legacy_type(
+    r#type: &str,
+    data: &Map<String, Value>,
+) -> Result<(), SessionError> {
     if r#type == "request/header-delta" || r#type == "mode/set" {
         return Err(SessionError::Migration(format!(
             "unsupported legacy event `{type}` cannot be migrated"
@@ -308,7 +327,10 @@ fn normalize_turn_start(r#type: &str, data: Map<String, Value>) -> Map<String, V
     data
 }
 
-fn normalize_turn_end(r#type: &str, mut data: Map<String, Value>) -> Result<Map<String, Value>, SessionError> {
+fn normalize_turn_end(
+    r#type: &str,
+    mut data: Map<String, Value>,
+) -> Result<Map<String, Value>, SessionError> {
     if r#type != "turn/end" {
         return Ok(data);
     }
@@ -333,7 +355,9 @@ fn normalize_turn_end(r#type: &str, mut data: Map<String, Value>) -> Result<Map<
             if reason_map.contains_key("error") {
                 None
             } else {
-                Some(json!({ "kind": "error", "error": normalize_legacy_error_reason(reason_map)? }))
+                Some(
+                    json!({ "kind": "error", "error": normalize_legacy_error_reason(reason_map)? }),
+                )
             }
         }
         _ => None,
@@ -344,7 +368,9 @@ fn normalize_turn_end(r#type: &str, mut data: Map<String, Value>) -> Result<Map<
     Ok(data)
 }
 
-fn normalize_legacy_error_reason(reason: &Map<String, Value>) -> Result<Map<String, Value>, SessionError> {
+fn normalize_legacy_error_reason(
+    reason: &Map<String, Value>,
+) -> Result<Map<String, Value>, SessionError> {
     // A v0 error reason without an `error` record carries `message`/`code`
     // (and optionally `code`) at its own level.
     let message = str_of(reason, "message").unwrap_or_default().to_string();
@@ -391,7 +417,9 @@ fn normalize_retry(
     }
     match str_of(&data, "retryId") {
         Some(existing) if !existing.is_empty() => {
-            state.retry_ids.insert(chain_key(&data), existing.to_string());
+            state
+                .retry_ids
+                .insert(chain_key(&data), existing.to_string());
         }
         _ => {
             if !data.contains_key("retryId") {
@@ -463,7 +491,10 @@ fn normalize_steering(
     // A `steering/message` becomes a `user/message`.
     if data.contains_key("message") {
         // Already wrapped: forward the inner message as a `user/message`.
-        let message = data.get("message").cloned().unwrap_or(Value::Object(Map::new()));
+        let message = data
+            .get("message")
+            .cloned()
+            .unwrap_or(Value::Object(Map::new()));
         let mut out = Map::new();
         out.insert("message".into(), message);
         return Ok(("user/message".to_string(), out));
@@ -527,7 +558,10 @@ fn normalize_message(
             if has("message") || !has("callId") || !has("content") || !has("isError") {
                 return Ok(data);
             }
-            let call_id = data.get("callId").cloned().unwrap_or(Value::String(String::new()));
+            let call_id = data
+                .get("callId")
+                .cloned()
+                .unwrap_or(Value::String(String::new()));
             let content = data.remove("content").unwrap_or(Value::Array(Vec::new()));
             let is_error = data.get("isError").cloned().unwrap_or(Value::Bool(false));
             let mut block = Map::new();
@@ -591,10 +625,14 @@ pub fn v1_to_v2(
             "assistant/chunk" => {
                 let turn = coord(envelope.data.get("turn"));
                 let step = coord(envelope.data.get("step"));
-                if let Some(pending) = &mut pending {
-                    if pending.terminal || pending.turn != turn || pending.step != step {
-                        flush_attempt(&mut out, pending.take());
+                let splits = match &pending {
+                    Some(current) => {
+                        current.terminal || current.turn != turn || current.step != step
                     }
+                    None => false,
+                };
+                if splits {
+                    flush_attempt(&mut out, pending.take());
                 }
                 let pending = pending.get_or_insert_with(|| PendingAttempt::new(turn, step));
                 let chunk = envelope.data.get("chunk").cloned().unwrap_or(Value::Null);
@@ -634,7 +672,9 @@ pub fn v1_to_v2(
                     continue;
                 }
                 if !envelope.data.contains_key("stream") {
-                    envelope.data.insert("stream".into(), Value::Array(Vec::new()));
+                    envelope
+                        .data
+                        .insert("stream".into(), Value::Array(Vec::new()));
                 }
                 envelope.data.remove("sourceEventSeqs");
                 envelope.data.remove("surfaceOp");
@@ -705,9 +745,7 @@ pub fn v2_to_v3(
         envelope.r#type = rename_ptc_event_type(&envelope.r#type);
         if envelope.r#type == "agent-preset/selected" {
             if str_of(&envelope.data, "agentPreset") == Some("code") {
-                envelope
-                    .data
-                    .insert("agentPreset".into(), json!("ptc"));
+                envelope.data.insert("agentPreset".into(), json!("ptc"));
             }
         }
         if envelope.r#type == "request/header" {
@@ -728,7 +766,10 @@ pub fn v2_to_v3(
         }
 
         if envelope.r#type == "step/start" {
-            step = Some((coord(envelope.data.get("turn")), coord(envelope.data.get("step"))));
+            step = Some((
+                coord(envelope.data.get("turn")),
+                coord(envelope.data.get("step")),
+            ));
         } else if matches!(envelope.r#type.as_str(), "step/end" | "turn/end") {
             step = None;
         }
@@ -795,7 +836,7 @@ fn rename_message_source_plugin(data: &mut Map<String, Value>) {
         }
     }
     for key in ["inserted", "messages"] {
-        if let Some(list) = data.get_mut(key).and_then(as_array) {
+        if let Some(list) = data.get_mut(key).and_then(as_array_mut) {
             for item in list.iter_mut() {
                 if let Some(item_map) = as_object_mut(item) {
                     if let Some(source) = item_map.get_mut("source").and_then(as_object_mut) {
@@ -916,11 +957,13 @@ pub fn v3_to_v4(
 
 /// Lift `isError` / `callId` from a v3 `tool/result` payload into its `message`.
 fn lift_tool_result(data: &mut Map<String, Value>) {
+    let is_error = data.get("isError").cloned();
+    let call_id = data.get("callId").cloned();
     if let Some(message) = data.get_mut("message").and_then(as_object_mut) {
-        if let Some(is_error) = data.get("isError").cloned() {
+        if let Some(is_error) = is_error {
             message.insert("isError".into(), is_error);
         }
-        if let Some(call_id) = data.get("callId").cloned() {
+        if let Some(call_id) = call_id {
             message.insert("toolCallId".into(), call_id);
         }
     }
@@ -943,7 +986,9 @@ pub fn parse_event_line(line: &str, index: usize) -> Result<Envelope, SessionErr
     let value: Value =
         serde_json::from_str(line).map_err(|error| SessionError::Json(error.to_string()))?;
     let Some(object) = as_object(&value) else {
-        return Err(SessionError::Json("session event must be a JSON object".to_string()));
+        return Err(SessionError::Json(
+            "session event must be a JSON object".to_string(),
+        ));
     };
     if let Some(data) = object.get("data") {
         let data = data.as_object().cloned().unwrap_or_default();

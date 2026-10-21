@@ -34,16 +34,16 @@ pub mod prune;
 pub mod state;
 pub mod surface;
 
-pub use brand::{CommandId, CompactionId};
 pub use backend::{
     frame_summary, LlmSummarizationBackend, SummarizationBackend, SummarizationInput, SummaryResult,
 };
+pub use brand::{CommandId, CompactionId};
 pub use checkpoint::{
     compact_checkpoint_source, is_compact_checkpoint_source, CompactionCheckpointSource,
     COMPACT_CHECKPOINT_KIND,
 };
 pub use command::{
-    compact, should_compact, resolve_retain_tokens, CompactOptions, CompactPlan, CompactionService,
+    compact, resolve_retain_tokens, should_compact, CompactOptions, CompactPlan, CompactionService,
 };
 pub use error::{
     CompactionError, ConfigError, PruneError, SurfaceError, TargetPressureConfigError,

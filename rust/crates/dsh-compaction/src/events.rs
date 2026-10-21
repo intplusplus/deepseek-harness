@@ -460,17 +460,28 @@ impl CompactionEvent {
     /// type.
     pub fn decode(event: &SessionEvent) -> Option<Result<Self, serde_json::Error>> {
         let extension = event.extension()?;
+        // The stamped `type` discriminator is envelope metadata, not payload:
+        // the payload types declare `deny_unknown_fields` without a `type`
+        // field, so decoding the verbatim payload would always reject them.
         let decoded = match extension.kind() {
-            COMPACTION_START_TAG => extension.decode::<CompactionStart>().map(Self::Start),
-            COMPACTION_SUMMARY_TAG => extension
-                .decode::<CompactionSummary>()
+            COMPACTION_START_TAG => decode_payload::<CompactionStart>(extension).map(Self::Start),
+            COMPACTION_SUMMARY_TAG => decode_payload::<CompactionSummary>(extension)
                 .map(|payload| Self::Summary(Box::new(payload))),
-            COMPACTION_END_TAG => extension.decode::<CompactionEnd>().map(Self::End),
-            COMPACTION_PRUNE_TAG => extension.decode::<CompactionPrune>().map(Self::Prune),
+            COMPACTION_END_TAG => decode_payload::<CompactionEnd>(extension).map(Self::End),
+            COMPACTION_PRUNE_TAG => decode_payload::<CompactionPrune>(extension).map(Self::Prune),
             _ => return None,
         };
         Some(decoded)
     }
+}
+
+/// Deserialize an extension payload as `T` with its `type` tag removed.
+fn decode_payload<T: for<'de> Deserialize<'de>>(
+    extension: &ExtensionEvent,
+) -> Result<T, serde_json::Error> {
+    let mut payload = extension.payload().clone();
+    payload.remove("type");
+    serde_json::from_value(Value::Object(payload))
 }
 
 fn encode_payload<T: Serialize>(tag: &str, event: &T) -> Result<SessionEvent, serde_json::Error> {

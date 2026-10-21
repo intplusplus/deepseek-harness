@@ -123,7 +123,20 @@ pub fn plan_compaction_owner(
     stage: &str,
 ) -> Result<Option<u64>, CompactionError> {
     let state = inspect_compaction_entry_state(events)?;
-    assert_compaction_inactive(&state, stage)?;
+    plan_compaction_owner_from_state(&state, manual, stage)
+}
+
+/// Choose the owner from an already-inspected entry state.
+///
+/// The caller may have cleared `unmatched_compaction_start` because the marker's
+/// lease expired (see [`crate::lock::acquire_lock`]), which a log-only
+/// inspection cannot decide: lease expiry needs the current time.
+pub fn plan_compaction_owner_from_state(
+    state: &CompactionEntryState,
+    manual: bool,
+    stage: &str,
+) -> Result<Option<u64>, CompactionError> {
+    assert_compaction_inactive(state, stage)?;
     if manual {
         if state.open_turn.is_some() {
             return Err(CompactionError::ManualTurnOpen);

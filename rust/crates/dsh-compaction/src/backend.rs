@@ -14,7 +14,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dsh_llm::{ContentBlock, LlmCallConfig, Message, MessageId, ToolSchema, TokenUsage, UserMessage};
+use dsh_llm::{
+    ContentBlock, LlmCallConfig, Message, MessageId, TokenUsage, ToolSchema, UserMessage,
+};
 use dsh_provider::{LlmProvider, LlmRequest};
 use serde::Serialize;
 
@@ -176,7 +178,7 @@ pub fn frame_summary(summary: &[ContentBlock]) -> Vec<ContentBlock> {
 mod tests {
     use super::*;
     use dsh_llm::AssistantMessage;
-    use dsh_provider::{FnProvider, ScriptedProvider, text_response};
+    use dsh_provider::{text_response, FnProvider, ScriptedProvider};
 
     fn blocks_of(result: &SummaryResult) -> Vec<String> {
         result
@@ -217,9 +219,12 @@ mod tests {
 
     #[tokio::test]
     async fn scripted_provider_summarizes_and_frames() {
-        let backend = LlmSummarizationBackend::new(Arc::new(ScriptedProvider::new(vec![
-            text_response("mock", "mock", "compacted checkpoint text"),
-        ])));
+        let backend =
+            LlmSummarizationBackend::new(Arc::new(ScriptedProvider::new(vec![text_response(
+                "mock",
+                "mock",
+                "compacted checkpoint text",
+            )])));
 
         let result = backend
             .summarize(&SummarizationInput::default(), "mock", "mock", None)
@@ -229,7 +234,12 @@ mod tests {
         let framed = frame_summary(&result.summary);
         assert!(framed.len() >= 3);
         assert!(framed[0].as_text().unwrap().contains(SUMMARY_OPEN_TAG));
-        assert!(framed.last().unwrap().as_text().unwrap().contains(SUMMARY_CLOSE_TAG));
+        assert!(framed
+            .last()
+            .unwrap()
+            .as_text()
+            .unwrap()
+            .contains(SUMMARY_CLOSE_TAG));
     }
 
     #[tokio::test]

@@ -7,13 +7,14 @@ mod common;
 use std::sync::Arc;
 
 use common::{assistant, seq, system, user};
+use dsh_compaction::fold_surface;
 use dsh_compaction::{
-    compact, should_compact, CompactionEvent, CompactionService, CompactOptions, LlmSummarizationBackend,
-    ResolvedCompactSpec, DEFAULT_LEASE_MS,
+    compact, should_compact, CompactOptions, CompactionEvent, CompactionService,
+    LlmSummarizationBackend, ResolvedCompactSpec, DEFAULT_LEASE_MS,
 };
 use dsh_llm::ContentBlock;
-use dsh_provider::{FnProvider, ScriptedProvider, text_response};
-use dsh_session::{fold_surface, SessionEvent};
+use dsh_provider::{text_response, FnProvider, ScriptedProvider};
+use dsh_session::SessionEvent;
 
 /// A small balanced surface: system head + two user/assistant pairs.
 fn session_with_old_history() -> Vec<SessionEvent> {
@@ -32,7 +33,11 @@ async fn manual_compact_emits_the_full_event_chain() {
     let base_len = events.len();
 
     let backend = LlmSummarizationBackend::new(Arc::new(FnProvider::new(|_| {
-        Ok(text_response("mock", "mock", "## Current Work\n- consolidated checkpoint"))
+        Ok(text_response(
+            "mock",
+            "mock",
+            "## Current Work\n- consolidated checkpoint",
+        ))
     })));
 
     let options = CompactOptions {
@@ -47,7 +52,7 @@ async fn manual_compact_emits_the_full_event_chain() {
         prune_config: None,
     };
 
-    let plan = compact(&events, &backend, config(), &options)
+    let plan = compact(&events, &backend, &config(), &options)
         .await
         .unwrap()
         .expect("a compactable range exists");
@@ -92,18 +97,17 @@ async fn manual_compact_with_prune_phase_emits_prune_events() {
     let mut events = vec![
         system("s0"),
         common::assistant_with_calls("a1", &["c1"]),
-        common::tool_result(
-            "r1",
-            "c1",
-            vec![ContentBlock::text("x".repeat(20_000))],
-        ),
+        common::tool_result("r1", "c1", vec![ContentBlock::text("x".repeat(20_000))]),
         user("u1", vec![ContentBlock::text("follow-up")]),
         assistant("a2"),
     ];
 
-    let backend = LlmSummarizationBackend::new(Arc::new(ScriptedProvider::new(vec![
-        text_response("mock", "mock", "## Current Work\n- pruned and summarized"),
-    ])));
+    let backend =
+        LlmSummarizationBackend::new(Arc::new(ScriptedProvider::new(vec![text_response(
+            "mock",
+            "mock",
+            "## Current Work\n- pruned and summarized",
+        )])));
 
     let options = CompactOptions {
         manual: true,
@@ -121,7 +125,7 @@ async fn manual_compact_with_prune_phase_emits_prune_events() {
         }),
     };
 
-    let plan = compact(&events, &backend, config(), &options)
+    let plan = compact(&events, &backend, &config(), &options)
         .await
         .unwrap()
         .expect("a compactable range exists");
@@ -169,19 +173,17 @@ fn should_compact_is_a_pure_threshold_decision() {
 
 #[tokio::test]
 async fn compaction_service_runs_a_manual_transaction() {
-    let backend = LlmSummarizationBackend::new(Arc::new(ScriptedProvider::new(vec![
-        text_response("mock", "mock", "## Current Work\n- service-driven checkpoint"),
-    ])));
-    let service = CompactionService::new(
-        Arc::new(backend),
-        config(),
-        "mock",
-        "mock",
-    );
+    let backend =
+        LlmSummarizationBackend::new(Arc::new(ScriptedProvider::new(vec![text_response(
+            "mock",
+            "mock",
+            "## Current Work\n- service-driven checkpoint",
+        )])));
+    let service = CompactionService::new(Arc::new(backend), config(), "mock", "mock");
 
     let events = session_with_old_history();
     let plan = service
-        .compact_now(None, None, 1_000, DEFAULT_LEASE_MS, None)
+        .compact_now(&events, None, 1_000, DEFAULT_LEASE_MS, None)
         .await
         .unwrap()
         .expect("a compactable range exists");
@@ -211,9 +213,10 @@ async fn compaction_service_runs_a_manual_transaction() {
 async fn compact_returns_none_with_nothing_to_compact() {
     // A surface of only a system head yields no compactable range.
     let events = vec![system("s0")];
-    let backend = LlmSummarizationBackend::new(Arc::new(ScriptedProvider::new(vec![
-        text_response("mock", "mock", "summary"),
-    ])));
+    let backend =
+        LlmSummarizationBackend::new(Arc::new(ScriptedProvider::new(vec![text_response(
+            "mock", "mock", "summary",
+        )])));
     let options = CompactOptions {
         manual: true,
         source_command_id: None,
@@ -225,7 +228,9 @@ async fn compact_returns_none_with_nothing_to_compact() {
         max_tokens: Some(128),
         prune_config: None,
     };
-    let plan = compact(&events, &backend, config(), &options).await.unwrap();
+    let plan = compact(&events, &backend, &config(), &options)
+        .await
+        .unwrap();
     assert!(plan.is_none());
 }
 

@@ -5,9 +5,11 @@ mod common;
 
 use std::sync::Arc;
 
-use dsh_compaction::{frame_summary, LlmSummarizationBackend, SummarizationBackend, SummarizationInput};
+use dsh_compaction::{
+    frame_summary, LlmSummarizationBackend, SummarizationBackend, SummarizationInput,
+};
 use dsh_llm::{AssistantMessage, ContentBlock, Message, MessageId};
-use dsh_provider::{FnProvider, ScriptedProvider, text_response};
+use dsh_provider::{text_response, FnProvider, ScriptedProvider};
 
 #[tokio::test]
 async fn scripted_provider_drives_a_real_summarize_call() {

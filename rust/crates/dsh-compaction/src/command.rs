@@ -27,7 +27,7 @@ use super::brand::CommandId;
 use super::checkpoint::compact_checkpoint_source;
 use super::error::{CompactionError, SurfaceError};
 use super::events::{CompactionEvent, CompactionResult, CompactionSummary, ShadowedRange};
-use super::policy::{ResolvedConfig, ResolvedCompactSpec, ResolvedRetention};
+use super::policy::{ResolvedCompactSpec, ResolvedConfig, ResolvedRetention};
 use super::prune::{measure_content, plan_prune_session, PrunePlan, ResolvedPruneConfig};
 use super::state::{select_compactable_range, validate_surface_region, NodePrice};
 use super::surface::{fold_surface, SurfaceNodeKind, SurfaceProjection};
@@ -82,7 +82,7 @@ pub struct CompactPlan {
 pub async fn compact(
     events: &[SessionEvent],
     backend: &dyn SummarizationBackend,
-    config: &ResolvedConfig,
+    _config: &ResolvedConfig,
     options: &CompactOptions,
 ) -> Result<Option<CompactPlan>, CompactionError> {
     let stage = if options.manual {
@@ -92,13 +92,18 @@ pub async fn compact(
     };
 
     // Acquire the durable lock before any asynchronous work (matches TS order).
-    let start = super::lock::acquire_lock(events, options.manual, options.lease_ms, options.now, stage)?;
+    let start =
+        super::lock::acquire_lock(events, options.manual, options.lease_ms, options.now, stage)?;
     let compaction_id = start.compaction_id.clone();
-    let turn = start.turn;
     let source_command_id = start.source_command_id.clone();
 
-    // Work on a mutable copy so the model-free prune pass lands before selection.
+    // Work on a mutable copy so the model-free prune pass lands before
+    // selection. The `compaction/start` marker is part of that log: it occupies
+    // a durable position, so every later index (a prune replacement, the
+    // summary bracket) must be computed with it already present.
+    let start_event = CompactionEvent::Start(start.clone()).encode()?;
     let mut working = events.to_vec();
+    working.push(start_event.clone());
     let mut prune_events = Vec::new();
 
     if let Some(prune_config) = &options.prune_config {
@@ -182,8 +187,11 @@ pub async fn compact(
     // appends these events after `events`, so indices shift by `events.len()`.
     let base = events.len() as u64;
     let prune_count = prune_events.len() as u64;
-    let start_seq = SessionSeq::new(base)
-        .map_err(|_| CompactionError::Surface(SurfaceError::IndexOutOfRange { index: base as usize }))?;
+    let start_seq = SessionSeq::new(base).map_err(|_| {
+        CompactionError::Surface(SurfaceError::IndexOutOfRange {
+            index: base as usize,
+        })
+    })?;
     let summary_seq = SessionSeq::new(base + 1 + prune_count).map_err(|_| {
         CompactionError::Surface(SurfaceError::IndexOutOfRange {
             index: (base + 1 + prune_count) as usize,
@@ -208,7 +216,7 @@ pub async fn compact(
     };
 
     Ok(Some(CompactPlan {
-        start: CompactionEvent::Start(start).encode()?,
+        start: start_event,
         prune_events,
         summary,
         checkpoint,
@@ -250,9 +258,7 @@ fn event_content(event: &SessionEvent) -> Option<&[ContentBlock]> {
 fn derive_message(event: &SessionEvent) -> Option<Message> {
     match event {
         SessionEvent::Core(core) => match core {
-            CoreEvent::SystemMessage { message, .. } => {
-                Some(Message::System((**message).clone()))
-            }
+            CoreEvent::SystemMessage { message, .. } => Some(Message::System((**message).clone())),
             CoreEvent::UserMessage { message } => Some(Message::User((**message).clone())),
             CoreEvent::DeveloperMessage { message, .. } => {
                 Some(Message::Developer((**message).clone()))

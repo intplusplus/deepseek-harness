@@ -107,8 +107,17 @@ pub fn acquire_lock(
     now: i64,
     stage: &str,
 ) -> Result<CompactionStart, CompactionError> {
-    let turn = super::state::plan_compaction_owner(events, manual, stage)?;
-    let _ = lease_ms;
+    let mut state = super::state::inspect_compaction_entry_state(events)?;
+    // A stale marker whose lease has expired (`now >= acquiredAt + lease`) no
+    // longer blocks: that is what lets a crashed transaction be superseded
+    // without a manual recovery step. `assert_compaction_inactive` stays the
+    // authority for live markers and for `session/end-seed` boundaries.
+    if state.unmatched_compaction_start.is_some() {
+        if let LockState::Free = inspect_lock(events, now, lease_ms) {
+            state.unmatched_compaction_start = None;
+        }
+    }
+    let turn = super::state::plan_compaction_owner_from_state(&state, manual, stage)?;
     Ok(CompactionStart::with_acquired_at(
         CompactionId::random(),
         None,
@@ -121,10 +130,7 @@ pub fn acquire_lock(
 ///
 /// The end event echoes the start's identity and owning turn so a pure replay
 /// can pair it; `error` records a failed attempt when one occurred.
-pub fn release_lock(
-    start: &CompactionStart,
-    error: Option<String>,
-) -> CompactionEnd {
+pub fn release_lock(start: &CompactionStart, error: Option<String>) -> CompactionEnd {
     CompactionEnd::new(
         start.compaction_id.clone(),
         start.source_command_id.clone(),
@@ -135,9 +141,8 @@ pub fn release_lock(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::brand::CommandId;
     use super::super::events::CompactionTurn;
+    use super::*;
 
     fn start_event(id: &str, acquired_at: Option<i64>) -> SessionEvent {
         let start = match acquired_at {
@@ -197,7 +202,10 @@ mod tests {
     #[test]
     fn free_when_start_is_matched_by_end() {
         let events = vec![start_event("c1", Some(1_000)), end_event("c1")];
-        assert_eq!(inspect_lock(&events, 1_500, DEFAULT_LEASE_MS), LockState::Free);
+        assert_eq!(
+            inspect_lock(&events, 1_500, DEFAULT_LEASE_MS),
+            LockState::Free
+        );
     }
 
     #[test]
@@ -206,7 +214,10 @@ mod tests {
             start_event("c1", Some(1_000)),
             SessionEvent::Core(CoreEvent::EndSeed { inherited: false }),
         ];
-        assert_eq!(inspect_lock(&events, 1_100, DEFAULT_LEASE_MS), LockState::Free);
+        assert_eq!(
+            inspect_lock(&events, 1_100, DEFAULT_LEASE_MS),
+            LockState::Free
+        );
     }
 
     #[test]
@@ -221,14 +232,17 @@ mod tests {
             CompactionEvent::Start(start).encode().unwrap(),
             CompactionEvent::End(end).encode().unwrap(),
         ];
-        assert_eq!(inspect_lock(&events, 9_000, DEFAULT_LEASE_MS), LockState::Free);
+        assert_eq!(
+            inspect_lock(&events, 9_000, DEFAULT_LEASE_MS),
+            LockState::Free
+        );
     }
 
     #[test]
     fn acquire_rejects_an_active_lock() {
         let events = vec![start_event("c1", Some(1_000))];
-        let error = acquire_lock(&events, true, DEFAULT_LEASE_MS, 1_200, "manual compaction")
-            .unwrap_err();
+        let error =
+            acquire_lock(&events, true, DEFAULT_LEASE_MS, 1_200, "manual compaction").unwrap_err();
         assert!(matches!(error, CompactionError::CompactionBusy { .. }));
     }
 
@@ -239,10 +253,11 @@ mod tests {
             start_event("c1", Some(1_000)),
             end_event("c1"),
         ];
-        // A fresh, between-turn manual acquire is fine after the matched lock.
-        let _ = CommandId::new("ignored");
-        let start =
-            acquire_lock(&events, true, DEFAULT_LEASE_MS, 2_000, "manual compaction").unwrap();
-        assert!(start.turn.is_standalone());
+        // `compaction/README.md`: a manual bracket requires **no** open turn and
+        // stamps `turn: null`, so an open turn is rejected even though the
+        // previous transaction's lock is already matched.
+        let error =
+            acquire_lock(&events, true, DEFAULT_LEASE_MS, 2_000, "manual compaction").unwrap_err();
+        assert!(matches!(error, CompactionError::ManualTurnOpen));
     }
 }

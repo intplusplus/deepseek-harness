@@ -83,12 +83,10 @@ pub fn encode(session: &Session) -> Result<String, SessionError> {
 pub fn decode(text: &str) -> Result<Session, SessionError> {
     let mut lines = text.lines();
     let header_line = lines.next().ok_or(SessionError::EmptyLog)?;
-    let header_value: serde_json::Value = serde_json::from_str(header_line)
-        .map_err(|error| SessionError::Json(error.to_string()))?;
-    let is_physical = header_value
-        .get("type")
-        .and_then(Value::as_str)
-        == Some("session");
+    let header_value: serde_json::Value =
+        serde_json::from_str(header_line).map_err(|error| SessionError::Json(error.to_string()))?;
+    let is_physical = header_value.get("type").and_then(|value| value.as_str()) == Some("session");
+    let _ = is_physical;
     let version = migration::detect_version(&header_value).ok_or_else(|| {
         SessionError::Json("session header is missing a format version".to_string())
     })?;
@@ -118,8 +116,8 @@ pub fn decode(text: &str) -> Result<Session, SessionError> {
         index += 1;
     }
     let (v4_header, flat_events) = migration::migrate_session(header_value, envelopes, &[])?;
-    let header: SessionHeader = serde_json::from_value(v4_header)
-        .map_err(|error| SessionError::Json(error.to_string()))?;
+    let header: SessionHeader =
+        serde_json::from_value(v4_header).map_err(|error| SessionError::Json(error.to_string()))?;
     let mut events = Vec::with_capacity(flat_events.len());
     for flat in flat_events {
         events.push(
@@ -131,7 +129,10 @@ pub fn decode(text: &str) -> Result<Session, SessionError> {
 
 /// Decode a current-generation log directly: the header line plus one
 /// [`SessionEvent`] per remaining line.
-fn decode_current<'a, I>(header_value: &serde_json::Value, lines: I) -> Result<Session, SessionError>
+fn decode_current<'a, I>(
+    header_value: &serde_json::Value,
+    lines: I,
+) -> Result<Session, SessionError>
 where
     I: Iterator<Item = &'a str>,
 {

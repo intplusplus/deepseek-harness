@@ -3,7 +3,7 @@
 
 use dsh_compaction::{
     acquire_lock, inspect_lock, release_lock, CompactionEvent, CompactionId, CompactionStart,
-    CompactionTurn, DEFAULT_LEASE_MS, LockState,
+    CompactionTurn, LockState, DEFAULT_LEASE_MS,
 };
 use dsh_session::{CoreEvent, SessionEvent};
 
@@ -39,7 +39,10 @@ fn acquire_then_release_is_observable_as_free() {
         CompactionEvent::Start(start).encode().unwrap(),
         CompactionEvent::End(end).encode().unwrap(),
     ];
-    assert_eq!(inspect_lock(&events, 2_000, DEFAULT_LEASE_MS), LockState::Free);
+    assert_eq!(
+        inspect_lock(&events, 2_000, DEFAULT_LEASE_MS),
+        LockState::Free
+    );
 }
 
 #[test]
@@ -75,13 +78,17 @@ fn end_seed_after_unmatched_start_releases_the_lock() {
         start_event("c1", Some(1_000)),
         SessionEvent::Core(CoreEvent::EndSeed { inherited: false }),
     ];
-    assert_eq!(inspect_lock(&events, 1_500, DEFAULT_LEASE_MS), LockState::Free);
+    assert_eq!(
+        inspect_lock(&events, 1_500, DEFAULT_LEASE_MS),
+        LockState::Free
+    );
 }
 
 #[test]
 fn acquire_is_rejected_while_another_lock_is_held() {
     let events = vec![start_event("c1", Some(1_000))];
-    let error = acquire_lock(&events, true, DEFAULT_LEASE_MS, 1_200, "manual compaction").unwrap_err();
+    let error =
+        acquire_lock(&events, true, DEFAULT_LEASE_MS, 1_200, "manual compaction").unwrap_err();
     assert!(matches!(
         error,
         dsh_compaction::CompactionError::CompactionBusy { .. }
