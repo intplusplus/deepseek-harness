@@ -14,7 +14,8 @@ use dsh_compaction::{
 use dsh_llm::{FinishReason, LlmCallConfig, Message, UserMessage};
 use dsh_provider::{LlmProvider, LlmRequest};
 use dsh_retry::{
-    encode_retry, encode_retry_started, fold_retry_state, plan_retry, RetryConfig, RetryStateError,
+    encode_retry, encode_retry_started, fold_retry_state, fused_wait, ignored_downstream_warning,
+    negotiate_always, plan_retry, AlwaysNegotiation, RetryConfig, RetryMode, RetryStateError,
 };
 use dsh_session::{
     derive_messages, fold_request_header, CoreEvent, EpochHeader, RequestContext,
@@ -624,13 +625,19 @@ impl<'a> AgentLoop<'a> {
     /// configuration at all — the failure ends the turn, which is exactly what
     /// the driver did before recovery existed.
     ///
+    /// An always policy first consults the downstream recovery: an adopted
+    /// `retry` answer pushes the same step again with no `llm/retry` event
+    /// and no local wait, a downstream failure is logged and ignored, and an
+    /// abort from either cancellation source — before the consultation or
+    /// right after it settles — wins over the decision and the fallback. A
+    /// normal policy never negotiates.
+    ///
     /// The durable `llm/retry` event is written *before* the wait and
     /// `llm/retry-started` after it, so a log always shows that a retry was
-    /// scheduled even if the process never got to spend the delay.
-    ///
-    /// The wait is raced against [`RetryConfig::cancel`]: an external
-    /// cancellation ends it without writing `llm/retry-started`, and the step
-    /// ends as a user abort, exactly as a cancelled delay does.
+    /// scheduled even if the process never got to spend the delay. The wait
+    /// is fused to both cancellation sources — the turn's own and the
+    /// installed lifecycle's — and either one ends it without
+    /// `llm/retry-started`.
     async fn recover_request(
         &mut self,
         turn: u64,
@@ -638,6 +645,23 @@ impl<'a> AgentLoop<'a> {
         attempts: usize,
         failure: dsh_llm::LlmFailure,
     ) -> Result<StepAttempt, LoopError> {
+        // When the host installed a lifecycle, the whole recovery — the
+        // always negotiation included — registers as one in-flight operation
+        // the unload drain waits for. A registration rejected by a started
+        // disposal is the TypeScript stale callback: it ends the turn
+        // without entering any recovery path.
+        let _guard = match self
+            .config
+            .retry
+            .as_ref()
+            .and_then(|retry| retry.lifecycle.as_ref())
+        {
+            Some(lifecycle) => match lifecycle.begin() {
+                Some(guard) => Some(guard),
+                None => return Ok(StepAttempt::Ended(TurnEndReason::error(failure))),
+            },
+            None => None,
+        };
         // Overflow recovery is deterministic and takes precedence over a
         // provider retry policy: retrying an over-window request unchanged can
         // only fail again.
@@ -655,6 +679,53 @@ impl<'a> AgentLoop<'a> {
             return Ok(StepAttempt::Ended(attempt_limit_reason(retry.max_attempts)));
         }
 
+        // Always mode gives the downstream recovery its chance before any
+        // local scheduling; normal mode never negotiates. The abort checks
+        // below read both cancellation sources directly: that is the union
+        // the TypeScript fused signal represents, without needing a pump to
+        // propagate one source into the other between two synchronous
+        // checks. `negotiate_always` re-checks the turn's source around the
+        // downstream settle; the lifetime's is checked here, before and
+        // after.
+        if policy.mode() == RetryMode::Always {
+            let lifetime_aborted = retry
+                .lifecycle
+                .as_ref()
+                .is_some_and(|lifecycle| lifecycle.aborted());
+            if retry.cancel.is_cancelled() || lifetime_aborted {
+                return Ok(StepAttempt::Ended(TurnEndReason::Aborted {
+                    reason: TurnEndCancelCause::User,
+                }));
+            }
+            if let Some(downstream) = retry.downstream.as_deref() {
+                let negotiation = negotiate_always(&retry.cancel, downstream).await;
+                // The lifetime abort wins over a settled downstream decision
+                // and over the local fallback alike; without an installed
+                // lifecycle this is always false.
+                if retry
+                    .lifecycle
+                    .as_ref()
+                    .is_some_and(|lifecycle| lifecycle.aborted())
+                {
+                    return Ok(StepAttempt::Ended(TurnEndReason::Aborted {
+                        reason: TurnEndCancelCause::User,
+                    }));
+                }
+                match negotiation {
+                    AlwaysNegotiation::Adopted(_) => return Ok(StepAttempt::Retry),
+                    AlwaysNegotiation::Aborted => {
+                        return Ok(StepAttempt::Ended(TurnEndReason::Aborted {
+                            reason: TurnEndCancelCause::User,
+                        }))
+                    }
+                    AlwaysNegotiation::Ignored(error) => {
+                        eprintln!("{}: {error}", ignored_downstream_warning(&provider));
+                    }
+                    AlwaysNegotiation::Local => {}
+                }
+            }
+        }
+
         // Retry state is derived, not stored: the fold resets at `step/start`,
         // so replaying the whole log yields exactly this step's state.
         let state = fold_retry_state(self.session.events())?;
@@ -666,16 +737,16 @@ impl<'a> AgentLoop<'a> {
         self.append(
             encode_retry(&plan.retry_event(turn, step, failure)).map_err(RetryStateError::from)?,
         )?;
-        let waited = {
-            let delay = retry.delay.wait(plan.delay_ms);
-            let cancelled = retry.cancel.cancelled();
-            tokio::pin!(delay);
-            tokio::pin!(cancelled);
-            tokio::select! {
-                waited = &mut delay => waited,
-                () = &mut cancelled => false,
-            }
-        };
+        // Both cancellation sources race the wait. Without an installed
+        // lifecycle the turn's own source stands in as the second racer,
+        // which cannot cancel by itself, so the race stays a two-source one
+        // either way.
+        let lifetime = retry
+            .lifecycle
+            .as_ref()
+            .map(|lifecycle| lifecycle.lifetime())
+            .unwrap_or_else(|| retry.cancel.clone());
+        let waited = fused_wait(&*retry.delay, plan.delay_ms, &retry.cancel, &lifetime).await;
         if !waited {
             return Ok(StepAttempt::Ended(TurnEndReason::Aborted {
                 reason: TurnEndCancelCause::User,

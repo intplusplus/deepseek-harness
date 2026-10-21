@@ -1,0 +1,13 @@
+[package]
+name = "dsh-ptc-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dsh-ptc = { path = "../dsh-ptc" }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "fs"] }
+serde_json.workspace = true
+thiserror.workspace = true

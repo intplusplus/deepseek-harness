@@ -7,18 +7,22 @@
 //! event identity, attempt bounds — is under test.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use dsh_agent_loop::{AgentLoop, LoopConfig};
 use dsh_llm::{LlmFailure, Message, MessageId};
 use dsh_provider::{text_response, user_message, FnProvider};
 use dsh_retry::{
     constant_random, decode_retry, fold_retry_state, resolve_retry_policy, AlwaysRetryPolicyConfig,
-    BackoffConfig, CancelledDelay, NoDelay, NormalRetryPolicyConfig, ResolvedRetryPolicy,
-    RetryConfig, RetryPolicyConfig, TokioDelay, WaitCancel,
+    BackoffConfig, CancelledDelay, DownstreamError, DownstreamRecovery, NoDelay,
+    NormalRetryPolicyConfig, RequestErrorAction, ResolvedRetryPolicy, RetryConfig, RetryDelay,
+    RetryLifecycle, RetryPolicyConfig, TokioDelay, WaitCancel,
 };
 use dsh_session::{CoreEvent, RequestContext, Session, SessionEvent, SessionId, SessionMeta};
+use tokio::sync::watch;
 
 fn session() -> Session {
     Session::create(SessionId::new("t").unwrap(), SessionMeta::default(), 0)
@@ -135,6 +139,90 @@ fn retry_for_other_provider() -> RetryConfig {
     RetryConfig::new(policies)
         .with_delay(Arc::new(NoDelay))
         .with_random(constant_random(0.5))
+}
+
+/// How many events carry `tag`.
+fn count(session: &Session, tag: &str) -> usize {
+    tags(session).iter().filter(|t| *t == tag).count()
+}
+
+fn assert_aborted(reason: &dsh_session::TurnEndReason) {
+    assert_eq!(
+        reason,
+        &dsh_session::TurnEndReason::Aborted {
+            reason: dsh_session::TurnEndCancelCause::User
+        }
+    );
+}
+
+// ------------------------------------------------ downstream fixtures -----
+
+/// What a scripted downstream recovery answers.
+#[derive(Clone, Copy)]
+enum Script {
+    /// Answer `retry`.
+    Retry,
+    /// Answer with no opinion.
+    NoOpinion,
+    /// Fail, which the negotiation must ignore.
+    Fail,
+}
+
+/// A scripted downstream recovery that counts its consultations.
+struct ScriptedDownstream {
+    script: Script,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl DownstreamRecovery for ScriptedDownstream {
+    async fn recover(&self) -> Result<Option<RequestErrorAction>, DownstreamError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match self.script {
+            Script::Retry => Ok(Some(RequestErrorAction::Retry)),
+            Script::NoOpinion => Ok(None),
+            Script::Fail => Err(DownstreamError("downstream recovery failed".into())),
+        }
+    }
+}
+
+fn scripted_downstream(script: Script) -> (ScriptedDownstream, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    (
+        ScriptedDownstream {
+            script,
+            calls: Arc::clone(&calls),
+        },
+        calls,
+    )
+}
+
+/// A downstream recovery that raises the plugin lifetime before answering
+/// `retry`: the abort must win over the settled decision.
+struct AbortingDownstream {
+    lifecycle: RetryLifecycle,
+}
+
+#[async_trait]
+impl DownstreamRecovery for AbortingDownstream {
+    async fn recover(&self) -> Result<Option<RequestErrorAction>, DownstreamError> {
+        self.lifecycle.lifetime().cancel();
+        Ok(Some(RequestErrorAction::Retry))
+    }
+}
+
+/// A wait that announces it was entered and then holds until its gate opens.
+struct GatedDelay {
+    entered: watch::Sender<bool>,
+    gate: watch::Receiver<bool>,
+}
+
+#[async_trait]
+impl RetryDelay for GatedDelay {
+    async fn wait(&self, _delay_ms: f64) -> bool {
+        let _ = self.entered.send(true);
+        self.gate.clone().wait_for(|open| *open).await.is_ok()
+    }
 }
 
 /// A provider that fails `failures` times, then answers with `text`.
@@ -590,4 +678,281 @@ async fn a_retry_event_round_trips_through_the_log() {
     assert!(raw.contains("\"llm/retry\""));
     let decoded: SessionEvent = serde_json::from_str(&raw).unwrap();
     assert_eq!(decoded.extension().unwrap().kind(), "llm/retry");
+}
+
+// -------------------------------------------- always-mode negotiation ----
+
+/// An always policy adopts a downstream `retry` verbatim: the same step
+/// tries again with no `llm/retry` event and no local wait.
+#[tokio::test]
+async fn an_always_policy_adopts_a_downstream_retry_without_scheduling() {
+    let mut session = session();
+    let registry = registry();
+    let provider = flaky_provider(1, "SERVER", "recovered");
+    let (downstream, calls) = scripted_downstream(Script::Retry);
+    let retry = retry_for(always_policy()).with_downstream(Arc::new(downstream));
+    let mut driver = AgentLoop::new(&mut session, &provider, &registry, route())
+        .with_config(LoopConfig::default().with_retry(retry));
+    driver.send(user_message("go"));
+
+    let report = driver.run_turn().await.unwrap();
+
+    assert_eq!(report.reason, dsh_session::TurnEndReason::Completed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(count(&session, "llm/retry"), 0);
+    assert_eq!(count(&session, "llm/retry-started"), 0);
+    assert_eq!(count(&session, "assistant/message"), 1);
+}
+
+/// A downstream recovery with no opinion falls through to the local
+/// schedule: the whole durable chain is written.
+#[tokio::test]
+async fn an_always_policy_with_no_downstream_opinion_schedules_locally() {
+    let mut session = session();
+    let registry = registry();
+    let provider = flaky_provider(1, "SERVER", "recovered");
+    let (downstream, calls) = scripted_downstream(Script::NoOpinion);
+    let retry = retry_for(always_policy()).with_downstream(Arc::new(downstream));
+    let mut driver = AgentLoop::new(&mut session, &provider, &registry, route())
+        .with_config(LoopConfig::default().with_retry(retry));
+    driver.send(user_message("go"));
+
+    let report = driver.run_turn().await.unwrap();
+
+    assert_eq!(report.reason, dsh_session::TurnEndReason::Completed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(count(&session, "llm/retry"), 1);
+    assert_eq!(count(&session, "llm/retry-started"), 1);
+}
+
+/// A downstream failure is logged and ignored — never propagated — and the
+/// local schedule takes over with the warning text as its diagnostic.
+#[tokio::test]
+async fn an_ignored_downstream_failure_falls_through_with_a_diagnostic() {
+    let mut session = session();
+    let registry = registry();
+    let provider = flaky_provider(1, "SERVER", "recovered");
+    let (downstream, calls) = scripted_downstream(Script::Fail);
+    let retry = retry_for(always_policy()).with_downstream(Arc::new(downstream));
+    let mut driver = AgentLoop::new(&mut session, &provider, &registry, route())
+        .with_config(LoopConfig::default().with_retry(retry));
+    driver.send(user_message("go"));
+
+    let report = driver.run_turn().await.unwrap();
+
+    // The warning text the driver logs is the TypeScript prefix.
+    assert_eq!(
+        dsh_retry::ignored_downstream_warning("demo"),
+        "llm-retry: provider \"demo\" always policy ignored a downstream recovery failure"
+    );
+    assert_eq!(report.reason, dsh_session::TurnEndReason::Completed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(count(&session, "llm/retry"), 1);
+    assert_eq!(count(&session, "llm/retry-started"), 1);
+}
+
+/// A normal policy never negotiates: the downstream is not consulted even
+/// when it would answer `retry`.
+#[tokio::test]
+async fn a_normal_policy_never_negotiates_with_the_downstream() {
+    let mut session = session();
+    let registry = registry();
+    let provider = flaky_provider(1, "SERVER", "recovered");
+    let (downstream, calls) = scripted_downstream(Script::Retry);
+    let retry = retry_for(normal_policy(2)).with_downstream(Arc::new(downstream));
+    let mut driver = AgentLoop::new(&mut session, &provider, &registry, route())
+        .with_config(LoopConfig::default().with_retry(retry));
+    driver.send(user_message("go"));
+
+    let report = driver.run_turn().await.unwrap();
+
+    assert_eq!(report.reason, dsh_session::TurnEndReason::Completed);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(count(&session, "llm/retry"), 1);
+    assert_eq!(count(&session, "llm/retry-started"), 1);
+}
+
+/// An abort that wins before the downstream is consulted ends the turn as a
+/// user abort, and the downstream is never called.
+#[tokio::test]
+async fn an_abort_before_the_negotiation_ends_the_turn_without_consulting() {
+    let mut session = session();
+    let registry = registry();
+    let provider = flaky_provider(1, "SERVER", "must not run");
+    let (downstream, calls) = scripted_downstream(Script::Retry);
+    let cancel = WaitCancel::new();
+    let retry = retry_for(always_policy())
+        .with_downstream(Arc::new(downstream))
+        .with_cancel(cancel.clone());
+    cancel.cancel();
+    let mut driver = AgentLoop::new(&mut session, &provider, &registry, route())
+        .with_config(LoopConfig::default().with_retry(retry));
+    driver.send(user_message("go"));
+
+    let report = driver.run_turn().await.unwrap();
+
+    assert_aborted(&report.reason);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(count(&session, "llm/retry"), 0);
+}
+
+/// A downstream that answers `retry` after raising the plugin lifetime
+/// loses to the abort: the post-settle check wins over the settled
+/// decision.
+#[tokio::test]
+async fn an_abort_during_the_negotiation_beats_the_downstream_decision() {
+    let mut session = session();
+    let registry = registry();
+    let provider = flaky_provider(1, "SERVER", "must not run");
+    let lifecycle = RetryLifecycle::new();
+    let downstream = AbortingDownstream {
+        lifecycle: lifecycle.clone(),
+    };
+    let retry = retry_for(always_policy())
+        .with_downstream(Arc::new(downstream))
+        .with_lifecycle(lifecycle);
+    let mut driver = AgentLoop::new(&mut session, &provider, &registry, route())
+        .with_config(LoopConfig::default().with_retry(retry));
+    driver.send(user_message("go"));
+
+    let report = driver.run_turn().await.unwrap();
+
+    assert_aborted(&report.reason);
+    assert_eq!(count(&session, "llm/retry"), 0);
+    assert_eq!(count(&session, "llm/retry-started"), 0);
+}
+
+/// A cancelled plugin lifetime ends the always negotiation before the
+/// downstream is consulted, even without a disposal.
+#[tokio::test]
+async fn a_cancelled_lifetime_ends_the_negotiation_before_the_downstream() {
+    let mut session = session();
+    let registry = registry();
+    let provider = flaky_provider(1, "SERVER", "must not run");
+    let lifecycle = RetryLifecycle::new();
+    lifecycle.lifetime().cancel();
+    let (downstream, calls) = scripted_downstream(Script::Retry);
+    let retry = retry_for(always_policy())
+        .with_downstream(Arc::new(downstream))
+        .with_lifecycle(lifecycle);
+    let mut driver = AgentLoop::new(&mut session, &provider, &registry, route())
+        .with_config(LoopConfig::default().with_retry(retry));
+    driver.send(user_message("go"));
+
+    let report = driver.run_turn().await.unwrap();
+
+    assert_aborted(&report.reason);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(count(&session, "llm/retry"), 0);
+}
+
+/// Without a downstream wired, an always policy still schedules locally:
+/// the negotiation degenerates to its abort checks and a fall-through.
+#[tokio::test]
+async fn an_always_policy_without_a_downstream_schedules_locally() {
+    let mut session = session();
+    let registry = registry();
+    let provider = flaky_provider(1, "SERVER", "recovered");
+    let mut driver = AgentLoop::new(&mut session, &provider, &registry, route())
+        .with_config(LoopConfig::default().with_retry(retry_for(always_policy())));
+    driver.send(user_message("go"));
+
+    let report = driver.run_turn().await.unwrap();
+
+    assert_eq!(report.reason, dsh_session::TurnEndReason::Completed);
+    assert_eq!(count(&session, "llm/retry"), 1);
+    assert_eq!(count(&session, "llm/retry-started"), 1);
+}
+
+/// A cancelled turn ends an always recovery that has no downstream and
+/// schedules nothing.
+#[tokio::test]
+async fn a_cancelled_turn_ends_an_always_recovery_without_a_downstream() {
+    let mut session = session();
+    let registry = registry();
+    let provider = flaky_provider(1, "SERVER", "must not run");
+    let cancel = WaitCancel::new();
+    let retry = retry_for(always_policy()).with_cancel(cancel.clone());
+    cancel.cancel();
+    let mut driver = AgentLoop::new(&mut session, &provider, &registry, route())
+        .with_config(LoopConfig::default().with_retry(retry));
+    driver.send(user_message("go"));
+
+    let report = driver.run_turn().await.unwrap();
+
+    assert_aborted(&report.reason);
+    assert_eq!(count(&session, "llm/retry"), 0);
+}
+
+// ------------------------------------------------------ the lifecycle ----
+
+/// A recovery captured before disposal is rejected without entering any
+/// recovery path — the TypeScript stale callback.
+#[tokio::test]
+async fn a_disposed_lifecycle_rejects_new_recoveries() {
+    let mut session = session();
+    let registry = registry();
+    let provider = flaky_provider(1, "SERVER", "must not run");
+    let lifecycle = RetryLifecycle::new();
+    lifecycle.dispose();
+    let retry = retry_for(normal_policy(2)).with_lifecycle(lifecycle);
+    let mut driver = AgentLoop::new(&mut session, &provider, &registry, route())
+        .with_config(LoopConfig::default().with_retry(retry));
+    driver.send(user_message("go"));
+
+    let report = driver.run_turn().await.unwrap();
+
+    match &report.reason {
+        dsh_session::TurnEndReason::Error { error } => assert_eq!(error.code, "SERVER"),
+        other => panic!("expected the original failure, got {other:?}"),
+    }
+    assert_eq!(count(&session, "llm/retry"), 0);
+    assert_eq!(count(&session, "llm/retry-started"), 0);
+}
+
+/// Disposal aborts the in-flight wait, and the drain settles only once the
+/// abandoned recovery has settled: the chain is cut with no
+/// `llm/retry-started`.
+#[tokio::test]
+async fn a_disposed_lifecycle_drains_the_in_flight_recovery() {
+    let lifecycle = RetryLifecycle::new();
+    let (entered_tx, mut entered_rx) = watch::channel(false);
+    let (_gate_tx, gate_rx) = watch::channel(false);
+    let mut policies = BTreeMap::new();
+    policies.insert("demo".to_string(), slow_policy());
+    let retry = RetryConfig::new(policies)
+        .with_delay(Arc::new(GatedDelay {
+            entered: entered_tx,
+            gate: gate_rx,
+        }))
+        .with_random(constant_random(0.5))
+        .with_lifecycle(lifecycle.clone());
+
+    let task = tokio::spawn(async move {
+        let mut session = session();
+        let registry = registry();
+        let provider = flaky_provider(1, "SERVER", "must not run");
+        let mut driver = AgentLoop::new(&mut session, &provider, &registry, route())
+            .with_config(LoopConfig::default().with_retry(retry));
+        driver.send(user_message("go"));
+        let report = driver.run_turn().await.unwrap();
+        (report, tags(&session))
+    });
+
+    // The recovery registered, scheduled its retry, and sits in the wait.
+    entered_rx.wait_for(|entered| *entered).await.unwrap();
+    let drain = lifecycle.dispose();
+    // The drain settles only once the abandoned wait ended the recovery.
+    drain.await;
+
+    let (report, log_tags) = task.await.unwrap();
+    assert_aborted(&report.reason);
+    assert_eq!(log_tags.iter().filter(|t| *t == "llm/retry").count(), 1);
+    assert_eq!(
+        log_tags
+            .iter()
+            .filter(|t| *t == "llm/retry-started")
+            .count(),
+        0
+    );
 }

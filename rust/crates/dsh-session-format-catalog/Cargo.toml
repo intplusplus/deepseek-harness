@@ -1,0 +1,10 @@
+[package]
+name = "dsh-session-format-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dsh-session = { path = "../dsh-session" }
+serde_json.workspace = true

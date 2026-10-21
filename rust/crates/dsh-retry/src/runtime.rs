@@ -20,6 +20,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::watch;
 
+use super::lifecycle::{DownstreamRecovery, RetryLifecycle};
 use super::policy::ResolvedRetryPolicy;
 
 /// Spends one scheduled retry delay.
@@ -178,6 +179,14 @@ pub struct RetryConfig {
     pub random: RandomSource,
     /// Attempts allowed within one step, including the first.
     pub max_attempts: usize,
+    /// The plugin-side lifetime behind `dispose()`, when the host installs
+    /// one. `None` — the default — keeps the driver lifetime-free: no guard
+    /// is registered and each wait races the turn cancellation alone.
+    pub lifecycle: Option<RetryLifecycle>,
+    /// The downstream recovery an always policy consults before scheduling
+    /// anything locally. `None` — the default — degenerates the negotiation
+    /// to its abort checks and a local fall-through.
+    pub downstream: Option<Arc<dyn DownstreamRecovery>>,
 }
 
 impl RetryConfig {
@@ -189,6 +198,8 @@ impl RetryConfig {
             cancel: WaitCancel::new(),
             random: seeded_random(0x2545_F491_4F6C_DD1D),
             max_attempts: DEFAULT_MAX_ATTEMPTS,
+            lifecycle: None,
+            downstream: None,
         }
     }
 
@@ -213,6 +224,18 @@ impl RetryConfig {
     /// Override the per-step attempt bound.
     pub fn with_max_attempts(mut self, max_attempts: usize) -> Self {
         self.max_attempts = max_attempts;
+        self
+    }
+
+    /// Install the plugin lifetime whose `dispose()` drains active recoveries.
+    pub fn with_lifecycle(mut self, lifecycle: RetryLifecycle) -> Self {
+        self.lifecycle = Some(lifecycle);
+        self
+    }
+
+    /// Wire the downstream recovery an always policy consults first.
+    pub fn with_downstream(mut self, downstream: Arc<dyn DownstreamRecovery>) -> Self {
+        self.downstream = Some(downstream);
         self
     }
 }

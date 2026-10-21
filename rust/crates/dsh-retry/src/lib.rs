@@ -24,6 +24,10 @@
 //!   is deterministic under test.
 //! - [`runtime`] — the wait itself, behind a [`RetryDelay`] trait, plus the
 //!   per-provider policy table a loop consults.
+//! - [`lifecycle`] — the two host-side lifetime behaviours: the always-mode
+//!   downstream negotiation, a pure decision point before [`decide::
+//!   plan_retry`], and the unload drain that settles or abandons every
+//!   in-flight wait on disposal.
 //!
 //! Splitting the decision out of the wait is what makes the recovery testable
 //! without fake timers: [`decide::plan_retry`] returns a plan, and the caller
@@ -36,6 +40,7 @@ pub mod brand;
 pub mod decide;
 pub mod events;
 pub mod json;
+pub mod lifecycle;
 pub mod policy;
 pub mod runtime;
 pub mod state;
@@ -46,6 +51,11 @@ pub use decide::{plan_retry, RequestErrorAction, RetryPlan};
 pub use events::{
     decode_retry, decode_retry_started, encode_retry, encode_retry_started, LlmRetryEvent,
     LlmRetryStartedEvent, LLM_RETRY_STARTED_TAG, LLM_RETRY_TAG,
+};
+pub use lifecycle::{
+    fused_wait, ignored_downstream_warning, negotiate_always, settle_downstream, ActiveRecovery,
+    AlwaysNegotiation, DownstreamError, DownstreamOutcome, DownstreamRecovery, Drain,
+    RetryLifecycle,
 };
 pub use policy::{
     resolve_retry_policy, retry_policy_key, AlwaysRetryPolicyConfig, BackoffConfig,

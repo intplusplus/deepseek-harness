@@ -29,8 +29,13 @@
 //!
 //! A provider failure is offered to `dsh_retry::plan_retry` before the turn
 //! is ended. Recovery only runs when a policy is configured for the request's
-//! provider, so a loop without retry behaves exactly as it did before. The
-//! retry wait is asynchronous and races the configured cancellation source.
+//! provider, so a loop without retry behaves exactly as it did before. An
+//! always policy first negotiates with the downstream recovery through
+//! `dsh_retry::negotiate_always`, adopting a downstream `retry` without any
+//! local scheduling. When a `dsh_retry::RetryLifecycle` is installed on the
+//! retry config, every recovery registers as in-flight work the unload drain
+//! waits for, and each scheduled wait dies with `dispose()`'s abort. The
+//! retry wait is asynchronous and races both cancellation sources.
 //!
 //! ## Compaction
 //!

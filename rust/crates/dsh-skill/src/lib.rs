@@ -15,13 +15,19 @@
 //!   order) and cross-layer shadowing (the nearest layer wins outright).
 //! - [`render`] — the canonical `<skill_content>` block shared by the `skill`
 //!   tool result and user-explicit invocation injection.
+//! - [`host`] — the host layer on top of those pure functions: the provider
+//!   registry with RAII registration guards, scope chains, the collect
+//!   cache, and the filesystem provider, ported from the Cordis
+//!   `SkillRegistry` service and `skill-filesystem` package.
 //!
 //! ## What stays in the host
 //!
-//! Provider discovery, loading, cancellation, the collect cache, and the
-//! Cordis `skills/change` event are lifetime concerns. They are intentionally
-//! absent: every function here is synchronous, pure, and testable without a
-//! clock, a filesystem, or a runtime.
+//! Provider discovery, loading, and the collect cache live in [`host`] as a
+//! synchronous, single-threaded registry; the TypeScript abort-signal race
+//! points and the Chokidar platform watchers are intentionally absent — the
+//! watcher port keeps only the path-relevance and invalidation-notification
+//! logic. Every function outside [`host`] remains synchronous, pure, and
+//! testable without a clock, a filesystem, or a runtime.
 //!
 //! The TypeScript registry validates scalars that a typed Rust provider cannot
 //! produce (non-string names, non-boolean invocation flags). Those checks are
@@ -33,11 +39,19 @@
 
 #![forbid(unsafe_code)]
 
+pub mod host;
 pub mod merge;
 pub mod name;
 pub mod render;
 pub mod types;
 pub mod validate;
+
+pub use host::{
+    is_potential_skill_path, is_relevant_watch_event, CatalogSnapshot, ChangeRegistration, FsEntry,
+    FsEntryKind, FsProviderConfig, FsSkillProvider, HostConfig, HostError, LocalLocator,
+    ProviderControl, ProviderError, ProviderObservation, ProviderRegistration, RuntimeRegistration,
+    SkillFiles, SkillHost, SkillLookupOptions, SkillProvider, SkillRoot, StdFiles, WatchEvent,
+};
 
 pub use merge::{
     merge_layers, resolve_layer, runtime_layer, sort_summaries, IndexedCandidate,

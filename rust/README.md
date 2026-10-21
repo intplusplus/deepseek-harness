@@ -6,8 +6,9 @@
 
 当前状态：**骨架 + 工具/权限/审批 + 异步驱动（重试恢复、post-execute、compaction 触发与
 overflow 恢复）+ system-prompt 宿主 + compaction（含 backend / 事务入口 / durable lock）
-+ context + todo/plan + session 投影 + skill + 旧代次迁移链（v0→v4）+ 真实 DeepSeek
-HTTP/SSE provider + PTC 协议层完成，842 个测试全绿，
++ context + todo/plan + session 投影 + skill（纯函数层 + 宿主层）+ 旧代次迁移链（v0→v4）
++ codec 目录 + 真实 DeepSeek HTTP/SSE provider + PTC 协议层 + PTC 沙箱宿主 + 重试生命周期
+（卸载排空、always 协商、驱动接线）完成，966 个测试全绿，
 `cargo clippy --workspace --all-targets -D warnings` 与 `cargo fmt --check` 干净**。
 `cargo run -p dsh` 跑一条由真实异步驱动跑出来的 turn（2 个 step、1 次真实工具执行）。
 
@@ -52,8 +53,10 @@ rust/
    ├─ dsh-session-projection/ session 投影注册表与 drive
    ├─ dsh-session-stats/     token / turn 统计 fold
    ├─ dsh-session-turn-outline/ turn 大纲 fold
-   ├─ dsh-skill/             skill 词表、校验、排序合并、模型侧渲染
+   ├─ dsh-session-format-catalog/ 历史/当前 codec 目录、版本分派、preset 迁移
+   ├─ dsh-skill/             skill 词表、校验、排序合并、模型侧渲染、宿主层（注册/发现/缓存）
    ├─ dsh-ptc/               PTC 事件词汇、宿主↔沙箱帧协议、调用关联、输出账本、保留名、进程策略
+   ├─ dsh-ptc-host/          PTC 沙箱宿主：真实子进程 spawn、stdio 帧通道、持久进程生命周期、超时回收
    └─ dsh/                   headless 演示二进制（端到端冒烟）
 ```
 
@@ -71,7 +74,8 @@ rust/
 | `packages/core/tools` | `dsh-tools` | 工具契约、`ToolRegistry`、`CancelSignal`、`parse_arguments`、权限链（`PreToolDecision` / `PostToolDecision`、waterfall 收敛、单调 guard、`ToolRestriction`） |
 | `packages/core/agent-loop`（tool-calls 部分） | `dsh-tools::schedule` | 模型序提交、exclusive 屏障、bounded parallel 组真正并发、取消补记合成结果、post-execute 接线 |
 | `packages/core/agent-loop`（turn 推进） | `dsh-agent-loop` | 异步 turn/step 边界、request header 与 route 首次落盘、工具结果上下文回收、step/attempt 上限、`agent/request-error` 恢复点、可取消等待 |
-| `packages/llm/llm-retry` | `dsh-retry` | 策略解析与校验、有界指数退避 + 对称抖动、`llm/retry` 与 `llm/retry-started` 持久化事件、重试状态 fold、纯决策函数 `plan_retry`、异步可取消 `RetryDelay` |
+| `packages/llm/llm-retry` | `dsh-retry` | 策略解析与校验、有界指数退避 + 对称抖动、`llm/retry` 与 `llm/retry-started` 持久化事件、重试状态 fold、纯决策函数 `plan_retry`、异步可取消 `RetryDelay`；生命周期：always 模式下游协商（`negotiate_always`，Adopted/Local/Ignored/Aborted 四路）、卸载排空（`RetryLifecycle` / `dispose()` / `Drain`）、`fused_wait` 双源竞速 |
+| `packages/ptc-runtime-node` | `dsh-ptc-host` | 子进程 spawn（env 白名单、`--max-old-space-size`）、stdio 帧通道（编解码复用 `dsh-ptc`）、共享评估泵（readiness→run→log/call/output-limit/done，并发 binding JoinSet）、一次性 `PtcHost`、持久进程宿主（复用/新建/拒绝走 `dsh-ptc::policy`、mode 变更失效、destroy/destroy_all）、空闲超时回收、退出码收集；Rust 化差异见 crate 文档（单套协议、stderr 仅诊断、owner 字符串） |
 | `packages/core/system-prompt` | `dsh-system-prompt` | section/context/tool/variable 注册表（RAII `Registration`）、中心化 order 表、严格 `{{variable}}` 插值、canonical 排序、suppression、`refreshContext`、Config 校验 |
 | `packages/compaction/compaction` | `dsh-compaction` | 4 个 `compaction/*` 事件、checkpoint source、tool pairing、surface fold |
 | `packages/compaction/compaction-tool-result-pruner` | `dsh-compaction::prune` | 确定性 head/middle/tail 剪枝与预算 |
@@ -84,7 +88,8 @@ rust/
 | `packages/session/session-projection` | `dsh-session-projection` | 投影注册表、eager drive、每 session 水位、变更订阅、checkpoint/restore/hydrate |
 | `packages/session/session-stats` | `dsh-session-stats` | token / turn / tool 统计 fold 与客户端视图 |
 | `packages/session/session-turn-outline` | `dsh-session-turn-outline` | turn 大纲 fold、prompt/response 预览、结束状态 |
-| `packages/skill/skill` | `dsh-skill` | 名称语法、词表与线格式、候选/定义校验、层内 rank 合并与跨层 shadowing、`<skill_content>` 渲染 |
+| `packages/session/session-format-catalog` | `dsh-session-format-catalog` | 三套 codec 目录（shared / with_children / historical）、`read_header` 四态分派（Current / MigrationRequired / Unsupported / Malformed）、restore 按版本分派到迁移边、preset 迁移与 developer history 测试场景端到端移植、错误文本逐字对齐 TS |
+| `packages/skill/skill` | `dsh-skill` | 名称语法、词表与线格式、候选/定义校验、层内 rank 合并与跨层 shadowing、`<skill_content>` 渲染；`host` 层：`SkillProvider` trait + RAII 注册、scope 链（环检测）、collect cache（revision 指纹 + LRU）、fs provider（roots 布局、frontmatter 解析、watcher 失效纯逻辑） |
 | `packages/core/scope` | — | 语义并入 `dsh-plugin::Scope` |
 
 ---
@@ -507,7 +512,7 @@ PTC 的 decode 读出，这条有交叉测试。
 ```bash
 cd rust
 cargo build --workspace
-cargo test  --workspace     # 842 tests
+cargo test  --workspace     # 966 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo run   -p dsh          # 端到端冒烟：turn → fold → JSONL → 回滚 → unload
@@ -520,13 +525,14 @@ cargo run   -p dsh          # 端到端冒烟：turn → fold → JSONL → 回�
 | `dsh-agent` | 4 | `dsh-llm` | 12 |
 | `dsh-plugin` | 8 | `dsh-session` | 72 |
 | `dsh-tools` | 75 | `dsh-system-prompt` | 76 |
-| `dsh-agent-loop` | 32 | `dsh-retry` | 58 |
+| `dsh-agent-loop` | 43 | `dsh-retry` | 75 |
 | `dsh-compaction` | 148 | `dsh-context` | 81 |
 | `dsh-todo` | 21 | `dsh-plan` | 44 |
 | `dsh-session-projection` | 36 | `dsh-session-stats` | 13 |
-| `dsh-session-turn-outline` | 16 | `dsh-skill` | 21 |
+| `dsh-session-turn-outline` | 16 | `dsh-skill` | 46 |
 | `dsh-provider` | 4 | `dsh-provider-deepseek` | 47 |
-| `dsh-ptc` | 74 | **合计** | **842** |
+| `dsh-ptc` | 74 | `dsh-ptc-host` | 36 |
+| `dsh-session-format-catalog` | 35 | **合计** | **966** |
 
 demo 二进制依次演示：插件加载 → **由 `AgentLoop` 真实驱动的一条 turn**（`ScriptedProvider`
 先回一个 `echo` 工具调用、再回一句收尾文本，`EchoTool` 真实执行，2 个 step）→
@@ -545,12 +551,12 @@ waterfall 决策 → 其余 fold → 失败加载回滚 → unload → agent 身
 | 工具权限的 async 部分 | ✅ 已完成：`ApprovalService`、审批 waterfall、超时与取消追平（`dsh-tools::approval`，75 tests 合计） |
 | PTC 的协议与策略 | ✅ 已完成：事件词汇、帧协议、调用关联、账本、保留名、进程策略（`dsh-ptc` 74 tests） |
 | session format 迁移链（v0→v4） | ✅ 已完成：五段链 + 真实样本拒绝断言 + 合成样本端到端 golden |
-| 重试的生命周期 | 可取消等待已完成；插件卸载前排空、always 模式先问下游仍缺宿主 |
-| PTC 的真实沙箱进程 | 协议已定；spawn / stdio / 生命周期 / 超时回收 / Python·TS 绑定生成未搬（宿主职责） |
+| 重试的生命周期 | ✅ 已完成：卸载排空（`RetryLifecycle`/`dispose()`/`Drain`）、always 模式下游协商、`fused_wait` 双源竞速；已接进 `dsh-agent-loop::recover_request`（75 + 43 tests） |
+| PTC 的真实沙箱进程 | ✅ 已完成：`dsh-ptc-host`（36 tests，真实 Node 子进程离线测试）；未搬：sandbox 侧 bootstrap/REPL/类型剥离（属子进程内部）、confine 后端、Electron 打包形态 |
 | system-prompt 宿主（Cordis 部分） | ✅ 已完成：注册表、change 事件、assemble waterfall、scope 链父级遍历（76 tests） |
 | context 的 file/session reference | ✅ 已完成：实现 + 独立测试（81 tests） |
-| session-format-catalog（历史/当前 codec 目录、developer history、preset 迁移） | 未搬；迁移链本身已完成，目录层是"选哪个 codec"的分派 |
-| skill 的 provider/collect cache/scope 链 | 纯词表与合并规则已完成；宿主注册与发现未搬 |
+| session-format-catalog（历史/当前 codec 目录、developer history、preset 迁移） | ✅ 已完成：三套目录 + `read_header` 四态分派 + restore 分派（35 tests）；未搬：`current.ts`/`message-projections.ts` 的词汇校验（归属 `dsh-session` 的 restore 运行时路径，非分派层） |
+| skill 的 provider/collect cache/scope 链 | ✅ 已完成：`dsh-skill::host`（provider trait + RAII 注册、scope 链、collect cache、fs provider，46 tests）；未搬：平台 watcher（chokidar/WatchFile）、完整 YAML 解析、AbortSignal 竞速 |
 | PTC 之外的工具目录/`ptc-calls` 记录接线 | `dsh-ptc::calls` 已建模；接进真实调度器待沙箱落地 |
 | TUI / IPC / 桌面壳 | 与语言无关，优先级最低 |
 | TS ↔ Rust 端到端互操作 | encoder-level fixture 已建立；真实 TS 运行时回读 Rust 产物、`Session.append` 端到端仍待补 |
@@ -571,12 +577,13 @@ waterfall 决策 → 其余 fold → 失败加载回滚 → unload → agent 身
 6. ~~**system-prompt 宿主**~~ ✅
 7. ~~**PTC 协议层**~~ ✅；下一段是真实沙箱进程
 8. **剩余优先级**：
-   1. **PTC 沙箱宿主**：把 `dsh-ptc` 的帧协议接到真实子进程（Node/Python），含生命周期与超时回收。
-   2. **session-format-catalog**：历史/当前 codec 目录与 developer history，是"选哪个 codec"的分派层。
+   1. ~~**PTC 沙箱宿主**~~ ✅（`dsh-ptc-host`）
+   2. ~~**session-format-catalog**~~ ✅
    3. **TS ↔ Rust 端到端 golden run**：TS 写 → Rust 读 → Rust 写 → TS 读，替换前的最后一道证据。
-   4. **skill / 工具目录的宿主注册**（scope 链、discovery、cache）。
-   5. **重试的卸载排空**与 always 模式的下游协商。
-   6. TUI / IPC 按产品优先级推进。
+   4. ~~**skill / 工具目录的宿主注册**~~ ✅（`dsh-skill::host`；工具目录宿主未搬）
+   5. ~~**重试的卸载排空**与 always 模式的下游协商~~ ✅（已接线进驱动）
+   6. **宿主装配层**：把 `RetryLifecycle::dispose()`、`PtcHost`、`SkillHost` 接到统一的插件宿主生命周期（对应 TS 的 cordis ctx.effect 排空语义）。
+   7. TUI / IPC 按产品优先级推进。
 9. 把 `rust/README.md` 作为回归基准，逐个替换 TS 包的实现入口。
 
 ---
@@ -691,3 +698,35 @@ shadowed seq，少一条前置事件就让整个区间错位一格。
 - `cargo clippy --workspace --all-targets -- -D warnings` → 干净
 - `cargo fmt --all -- --check` → 干净
 - `cargo run -p dsh` → 端到端冒烟通过（turn → fold → JSONL → 回滚 → unload）
+
+---
+
+## 10. 本轮并行移植记录（2026-10-22 第二轮）
+
+基线 842 全绿后，按 crate 边界开 4 个并行子 agent（写者互不重叠），随后追加 1 个接线 agent：
+
+| 工作流 | 写入边界 | 结果 |
+| --- | --- | --- |
+| PTC 沙箱宿主 | `dsh-ptc-host`（新 crate） | 36 tests：真实 Node 子进程离线测试，one-shot 16 + persistent 13 + 配置/env/超时 7；帧编解码复用 `dsh-ptc`，持久进程复用/新建/拒绝走 `dsh-ptc::policy`；新增空闲回收与退出码收集（TS 无） |
+| session-format-catalog | `dsh-session-format-catalog`（新 crate） | 35 tests：三套目录、`read_header` 四态、restore 按版本分派到迁移边；错误文本逐字对齐 TS；`current.ts` 词汇校验明确归属 `dsh-session` restore 路径 |
+| skill 宿主层 | `dsh-skill::host` | 46 tests（+25）：provider trait + RAII 注册、scope 链（环检测）、collect cache（revision 指纹 + LRU）、fs provider（真实临时目录端到端）；合并规则零重复实现 |
+| 重试生命周期 | `dsh-retry` | 75 tests（+17）：always 协商四路、卸载排空（dispose/Drain）、`fused_wait`；线格式字节对拍原样通过 |
+| 重试接线（追加） | `dsh-retry` + `dsh-agent-loop` | 43 tests（+11）：协商接入 `recover_request`（Adopted 跳过 llm/retry 与本地等待）、guard 覆盖整个恢复点、`fused_wait` 替换等待竞速；`LoopConfig.retry: None` 路径逐字节不变（turn.rs 原样通过） |
+
+### 收尾验证（主 agent 独立复跑）
+
+- `cargo test --workspace` → **966 passed, 0 failed**
+- `cargo clippy --workspace --all-targets -- -D warnings` → 干净
+- `cargo fmt --all -- --check` → 干净
+- `cargo run -p dsh` → 冒烟通过
+
+### 刻意偏离（均已写入 crate 文档）
+
+- `dsh-ptc-host`：统一单套协议（one-shot 也走 persistent envelope）；三根管简化为 stdin/stdout 帧 + stderr 诊断；abort 信号以 dispose 中止合成 Abort 失败帧替代。
+- `dsh-session-format-catalog`：seeded v2+ 头的 malformed 分类时机比 TS 提前（TS 推迟到 decoder.finish，两者最终都拒绝）；`data: null` 物理行按 Rust 信封审计更严。
+- `dsh-skill::host`：watcher 只搬失效通知纯逻辑；frontmatter 为受限 YAML（平铺标量 + 一层 metadata）。
+- `dsh-agent-loop`：abort 融合不用 pump 任务（避免对同步 is_cancelled 检查引入竞态），改为协商前后显式检查两个取消源的并集；Ignored 诊断暂用 eprintln（workspace 无日志门面，加依赖需动根 Cargo.toml）。
+
+### 剩余（§8 已同步）
+
+TS↔Rust 端到端 golden run；宿主装配层（把 dispose/PtcHost/SkillHost 接到统一插件宿主）；工具目录宿主；TUI/IPC。
