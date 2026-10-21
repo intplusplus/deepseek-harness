@@ -1,0 +1,21 @@
+[package]
+name = "dsh-retry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider-routed model-request retry policy, durable retry events, and recovery decisions"
+
+[dependencies]
+async-trait = { workspace = true }
+dsh-llm = { workspace = true }
+dsh-session = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

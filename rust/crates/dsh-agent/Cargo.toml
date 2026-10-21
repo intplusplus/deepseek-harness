@@ -1,0 +1,12 @@
+[package]
+name = "dsh-agent"
+description = "Agent identity and the durable inbox projection over the session log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dsh-llm.workspace = true
+dsh-session.workspace = true
+serde.workspace = true
+serde_json.workspace = true

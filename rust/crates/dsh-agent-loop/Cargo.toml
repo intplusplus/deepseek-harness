@@ -1,0 +1,20 @@
+[package]
+name = "dsh-agent-loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Turn/step driver over the session log, the provider, and the tool scheduler"
+
+[dependencies]
+dsh-llm = { workspace = true }
+dsh-provider = { workspace = true }
+dsh-retry = { workspace = true }
+dsh-session = { workspace = true }
+dsh-tools = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

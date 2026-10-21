@@ -1,0 +1,18 @@
+[package]
+name = "dsh-plan"
+description = "Plan mode state machine ported from packages/plan/plan-mode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dsh-llm = { workspace = true }
+dsh-session = { workspace = true }
+dsh-tools = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

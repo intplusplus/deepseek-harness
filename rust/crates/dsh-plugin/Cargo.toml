@@ -1,0 +1,9 @@
+[package]
+name = "dsh-plugin"
+description = "Cordis-like plugin kernel: typed services, typed events, and reversible effects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "dsh-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The model-call boundary: request, response, and the provider trait"
+
+[dependencies]
+async-trait = { workspace = true }
+dsh-llm = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

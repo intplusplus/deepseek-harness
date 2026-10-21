@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/deepseek-ai/deepseek-harness"
+
+[workspace.dependencies]
+dsh-plugin = { path = "crates/dsh-plugin" }
+dsh-llm = { path = "crates/dsh-llm" }
+dsh-session = { path = "crates/dsh-session" }
+dsh-agent = { path = "crates/dsh-agent" }
+dsh-tools = { path = "crates/dsh-tools" }
+dsh-provider = { path = "crates/dsh-provider" }
+dsh-agent-loop = { path = "crates/dsh-agent-loop" }
+dsh-retry = { path = "crates/dsh-retry" }
+dsh-system-prompt = { path = "crates/dsh-system-prompt" }
+dsh-compaction = { path = "crates/dsh-compaction" }
+dsh-context = { path = "crates/dsh-context" }
+dsh-todo = { path = "crates/dsh-todo" }
+dsh-plan = { path = "crates/dsh-plan" }
+dsh-session-projection = { path = "crates/dsh-session-projection" }
+dsh-session-stats = { path = "crates/dsh-session-stats" }
+dsh-session-turn-outline = { path = "crates/dsh-session-turn-outline" }
+dsh-skill = { path = "crates/dsh-skill" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` keeps `serde_json::Map` in insertion order, which is what
+# makes an extension event's payload serialize in the order its fields were
+# declared. Without it the map is a `BTreeMap` and every plugin event's field
+# order is silently alphabetical, so byte-level comparison against the
+# TypeScript wire format is impossible.
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }

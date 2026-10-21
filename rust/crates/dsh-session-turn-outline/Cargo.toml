@@ -1,0 +1,18 @@
+[package]
+name = "dsh-session-turn-outline"
+description = "The turn outline fold over the session log, ported from packages/session/session-turn-outline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dsh-llm = { workspace = true }
+dsh-session = { workspace = true }
+dsh-session-projection = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

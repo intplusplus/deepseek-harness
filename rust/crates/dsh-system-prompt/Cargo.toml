@@ -1,0 +1,16 @@
+[package]
+name = "dsh-system-prompt"
+description = "The system-prompt registry: ordered sections, runtime context, tool ordering, and prompt variables"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dsh-llm = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

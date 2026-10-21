@@ -47,3 +47,7 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 native/system/test/bin/
+
+# Rust workspace
+rust/target/
+rust/Cargo.lock

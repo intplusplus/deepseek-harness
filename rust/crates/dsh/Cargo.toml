@@ -1,0 +1,18 @@
+[package]
+name = "dsh"
+description = "Headless skeleton over the Rust harness foundation: plugin kernel, one turn with real tool execution, folds, and JSONL publication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dsh-agent.workspace = true
+dsh-agent-loop.workspace = true
+dsh-llm.workspace = true
+dsh-plugin.workspace = true
+dsh-provider.workspace = true
+dsh-session.workspace = true
+dsh-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

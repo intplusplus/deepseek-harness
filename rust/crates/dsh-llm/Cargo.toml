@@ -1,0 +1,11 @@
+[package]
+name = "dsh-llm"
+description = "Canonical provider-neutral message and streaming vocabulary for the loop, session log, and plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

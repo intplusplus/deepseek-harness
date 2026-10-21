@@ -1,0 +1,16 @@
+[package]
+name = "dsh-session-projection"
+description = "The session projection registry and drive, ported from packages/session/session-projection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dsh-session = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
