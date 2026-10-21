@@ -12,6 +12,7 @@ pub mod event;
 pub mod fold;
 pub mod jsonl;
 pub mod log;
+pub mod migration;
 pub mod types;
 
 pub use event::{CoreEvent, ExtensionEvent, SessionEvent, CORE_EVENT_TAGS};
@@ -24,6 +25,10 @@ pub use jsonl::{
     write_session,
 };
 pub use log::Session;
+pub use migration::{
+    detect_version, migrate_session, parse_event_line, v0_to_v1, v1_to_v2, v2_to_v3, v3_to_v4,
+    Envelope,
+};
 pub use types::{
     AgentCancelCause, EpochHeader, OptionalSessionSeq, RequestContext, RequestHeaderReason,
     SessionError, SessionHeader, SessionId, SessionLogOffset, SessionMeta, SessionOrigin,

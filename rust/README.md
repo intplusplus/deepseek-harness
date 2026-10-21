@@ -4,8 +4,9 @@
 > 目标不是一次性重写 4000+ TS 文件，而是先把**领域骨架**（领域模型 + 不变量 + 线格式）
 > 用 Rust 的类型系统重新锚定一遍，再逐块把实现搬过来。
 
-当前状态：**骨架 + 工具/权限 + 异步驱动（重试恢复与 post-execute）+ system-prompt +
-compaction + context + todo/plan + session 投影 + skill 完成，544 个测试全绿，
+当前状态：**骨架 + 工具/权限 + 异步驱动（重试恢复与 post-execute）+ system-prompt 宿主
+（change 事件 / assemble waterfall / scope 链父级遍历 / 整层销毁）+ compaction + context
+（含 file/session reference 独立测试）+ todo/plan + session 投影 + skill 完成，626 个测试全绿，
 `cargo clippy --workspace --all-targets -D warnings` 与 `cargo fmt --check` 干净**。
 `cargo run -p dsh` 跑一条由真实异步驱动跑出来的 turn（2 个 step、1 次真实工具执行）。
 
@@ -432,13 +433,13 @@ cargo run   -p dsh          # 端到端冒烟：turn → fold → JSONL → 回�
 | --- | ---: | --- | ---: |
 | `dsh-agent` | 4 | `dsh-llm` | 12 |
 | `dsh-plugin` | 8 | `dsh-session` | 30 |
-| `dsh-tools` | 55 | `dsh-system-prompt` | 54 |
+| `dsh-tools` | 55 | `dsh-system-prompt` | 76 |
 | `dsh-agent-loop` | 24 | `dsh-retry` | 58 |
-| `dsh-compaction` | 123 | `dsh-context` | 21 |
+| `dsh-compaction` | 123 | `dsh-context` | 81 |
 | `dsh-todo` | 21 | `dsh-plan` | 44 |
 | `dsh-session-projection` | 36 | `dsh-session-stats` | 13 |
 | `dsh-session-turn-outline` | 16 | `dsh-skill` | 21 |
-| `dsh-provider` | 4 | **合计** | **544** |
+| `dsh-provider` | 4 | **合计** | **626** |
 
 demo 二进制依次演示：插件加载 → **由 `AgentLoop` 真实驱动的一条 turn**（`ScriptedProvider`
 先回一个 `echo` 工具调用、再回一句收尾文本，`EchoTool` 真实执行，2 个 step）→
@@ -455,8 +456,8 @@ waterfall 决策 → 其余 fold → 失败加载回滚 → unload → agent 身
 | 重试的生命周期 | 可取消等待已完成；插件卸载前排空、always 模式先问下游仍缺宿主 |
 | compaction 异步 backend | 事件、surface、prune、budget 策略已完成；模型调用写 summary、durable lock、手动命令未搬 |
 | 工具权限的 async 部分 | 纯规则与 post-execute 已完成；挂载的 `ApprovalService`、审批往返、取消追平在途审批未搬 |
-| system-prompt 的 Cordis 宿主部分 | 注册表与组装规则已完成；change 事件、assemble waterfall、scope 链父级遍历、整层销毁未搬 |
-| context 的 file/session reference 测试 | 实现已落地；独立测试缺失（本轮限流中断） |
+| system-prompt 宿主（Cordis 部分） | ✅ 已完成：注册表、change 事件、assemble waterfall、scope 链父级遍历、整层销毁（76 tests） |
+| context 的 file/session reference 测试 | ✅ 已完成：实现 + 独立测试（81 tests） |
 | PTC（programmatic tool calling） | 需要嵌套 dispatch 与 `tool/ptc-dispatch*` 事件 |
 | session format 迁移链（v0→v4） | Rust 目前只读写当前 v4；旧代次读取与迁移未实现 |
 | TUI / IPC / 桌面壳 | 与语言无关，优先级最低 |
@@ -471,7 +472,7 @@ waterfall 决策 → 其余 fold → 失败加载回滚 → unload → agent 身
 
 ## 6. 下一步建议顺序
 
-1. **补 context 的 file/session reference 测试**（本轮中断点；实现已在，缺行为锁）。
+1. ~~**补 context 的 file/session reference 测试**~~ ✅ 已完成（81 tests；本轮续做）。
 2. **session format 迁移链**：把 v0→v1→v2→v3→v4 的读取/迁移搬进来，
    用 `packages/session/session-persistence-jsonl/tests/fixtures/released-v0-real-shapes.jsonl`
    做第一个真实旧代次 fixture。
@@ -481,7 +482,7 @@ waterfall 决策 → 其余 fold → 失败加载回滚 → unload → agent 身
    触发点接进 `dsh-agent-loop` 的 step 边界。
 5. **审批服务**：把 `resolve_ask` / post-execute 接到 async waterfall 与
    `ApprovalService`，补取消追平。
-6. **system-prompt 宿主**：change 事件、assemble waterfall、scope 链。
+6. ~~**system-prompt 宿主**~~ ✅ 已完成（76 tests；本轮续做）。
 7. **PTC** 与 **TUI/IPC** 按产品优先级推进。
 8. 把 `rust/README.md` 作为回归基准，逐个替换 TS 包的实现入口。
 
@@ -506,3 +507,19 @@ waterfall 决策 → 其余 fold → 失败加载回滚 → unload → agent 身
 `should_inject` 边界断言与未用 import、clippy 的 enum 体积告警），并完成全量验证。
 后续接手时先跑 §4 的四条命令；若继续并行，建议按 crate 边界分工，并在根 `Cargo.toml`
 与 `rust/README.md` 上保持单写者。
+
+---
+
+## 8. 续做记录（收尾中断点）
+
+上一轮（2026-10-21）在收尾阶段被限流中断，留下两处只落地实现、缺独立测试的缺口。
+本轮由主 agent 续做，补齐并刷新基线：
+
+| 工作流 | 结果 |
+| --- | --- |
+| system-prompt 宿主 | ✅ 完成 change 事件 / assemble waterfall / scope 链父级遍历 / 整层销毁；补 22 测试（76 tests） |
+| context file/session reference | ✅ 补 60 测试（file_reference 19 + session_reference 41，共 81 tests） |
+| 全量验证 | 626 tests 通过；clippy `-D warnings` 与 `fmt --check` 干净 |
+
+剩余 §6 的 #2–#5（session 迁移链 / 真实 provider / compaction backend / 审批服务）
+尚未启动；本轮继续按 crate 边界分工推进，根 `Cargo.toml` 与 `README.md` 保持单写者。

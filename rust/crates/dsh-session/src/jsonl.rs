@@ -19,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{event::SessionEvent, log::Session, types::*};
+use super::{event::SessionEvent, log::Session, migration, types::*};
 
 /// The file name a stored generation uses: the legacy v0 name, or `session.vN.jsonl`.
 pub fn session_file_name(version: u32) -> String {
@@ -76,11 +76,67 @@ pub fn encode(session: &Session) -> Result<String, SessionError> {
 }
 
 /// Decode an encoding back into a session, re-admitting every event.
+///
+/// Any stored generation below the current [`SESSION_FORMAT_VERSION`] is loaded
+/// and normalized up to v4 by the migration chain before folding; a current
+/// generation decodes directly; a future generation is refused.
 pub fn decode(text: &str) -> Result<Session, SessionError> {
     let mut lines = text.lines();
     let header_line = lines.next().ok_or(SessionError::EmptyLog)?;
-    let header: SessionHeader =
-        serde_json::from_str(header_line).map_err(|error| SessionError::Json(error.to_string()))?;
+    let header_value: serde_json::Value = serde_json::from_str(header_line)
+        .map_err(|error| SessionError::Json(error.to_string()))?;
+    let is_physical = header_value
+        .get("type")
+        .and_then(Value::as_str)
+        == Some("session");
+    let version = migration::detect_version(&header_value).ok_or_else(|| {
+        SessionError::Json("session header is missing a format version".to_string())
+    })?;
+
+    if version == SESSION_FORMAT_VERSION {
+        // Current generation: decode directly (works for both the Rust-native
+        // flat log and, by preserving the old rejection, a TypeScript-physical
+        // v4 envelope, which the Rust core does not model).
+        return decode_current(&header_value, lines);
+    }
+    if version > SESSION_FORMAT_VERSION {
+        return Err(SessionError::UnsupportedVersion {
+            found: version,
+            current: SESSION_FORMAT_VERSION,
+        });
+    }
+
+    // Legacy generation: parse every line into an envelope, migrate to v4, then
+    // restore through the usual admission path.
+    let mut envelopes = Vec::new();
+    let mut index = 0usize;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        envelopes.push(migration::parse_event_line(line, index)?);
+        index += 1;
+    }
+    let (v4_header, flat_events) = migration::migrate_session(header_value, envelopes, &[])?;
+    let header: SessionHeader = serde_json::from_value(v4_header)
+        .map_err(|error| SessionError::Json(error.to_string()))?;
+    let mut events = Vec::with_capacity(flat_events.len());
+    for flat in flat_events {
+        events.push(
+            serde_json::from_value(flat).map_err(|error| SessionError::Json(error.to_string()))?,
+        );
+    }
+    Session::restore(header, events)
+}
+
+/// Decode a current-generation log directly: the header line plus one
+/// [`SessionEvent`] per remaining line.
+fn decode_current<'a, I>(header_value: &serde_json::Value, lines: I) -> Result<Session, SessionError>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let header: SessionHeader = serde_json::from_value(header_value.clone())
+        .map_err(|error| SessionError::Json(error.to_string()))?;
     let mut events = Vec::new();
     for line in lines {
         if line.is_empty() {

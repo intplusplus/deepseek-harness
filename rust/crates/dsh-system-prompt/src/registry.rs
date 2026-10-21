@@ -26,7 +26,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::cell::{RefCell, RefMut};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -44,12 +44,17 @@ use super::types::{
     AssembleContext, AssembledContext, AssembledSection, Config, PromptAssembly, PromptContext,
     PromptSection, PromptVariables, ToolProviderResult,
 };
+use super::waterfall::{run_assemble_waterfall, AssembleListener};
 
 /// A variable provider, evaluated per assembly.
 pub type VariableProvider = Rc<dyn Fn(&AssembleContext) -> Option<String>>;
 
 /// A tool-schema provider, evaluated per assembly.
 pub type ToolProvider = Rc<dyn Fn(&AssembleContext) -> ToolProviderResult>;
+
+/// A `system-prompt/change` subscriber: no payload, because the TypeScript
+/// notification takes none.
+pub type ChangeListener = Rc<dyn Fn()>;
 
 /// All prompt registrations owned by one global or scoped layer.
 #[derive(Default)]
@@ -65,6 +70,22 @@ struct Layer {
     tool_providers: Vec<(Rc<()>, ToolProvider)>,
     /// Active runtime-context suppressors; non-empty means suppressed.
     suppressors: usize,
+}
+
+impl Layer {
+    /// Whether this layer owns no prompt registrations.
+    ///
+    /// TypeScript reclaims a scoped layer the moment it drains
+    /// (`ScopedLayers.effect`'s disposer deletes an empty scope layer), which
+    /// is what makes a scope's later re-registration start from a clean
+    /// overlay instead of a table that remembers deleted slots.
+    fn is_empty(&self) -> bool {
+        self.sections.is_empty()
+            && self.contexts.is_empty()
+            && self.variables.slots.iter().all(Option::is_none)
+            && self.tool_providers.is_empty()
+            && self.suppressors == 0
+    }
 }
 
 /// One layer's prompt variables, reproducing the iteration semantics of
@@ -115,14 +136,27 @@ impl VariableTable {
 
 /// The global layer plus one layer per scope key.
 ///
-/// TypeScript chains parent scopes through `ScopedLayers.chainLayers`, a
-/// rule owned by `@deepseek-ai/dsh-scope`; that walk is not ported. One
-/// global layer and one named scope layer reproduce every rule the
-/// system-prompt package itself states: scoped entries shadow globals by
-/// name, and both layers' tool providers contribute.
+/// TypeScript chains parent scopes through `ScopedLayers.chainLayers` over a
+/// parent relation owned by `@deepseek-ai/dsh-scope`. That relation is
+/// ported here as [`Registry::parents`]: a scope key is a plain `String`
+/// instead of an object identity, but the resulting chain — and every rule
+/// the system-prompt package states about it — is the same. Scoped entries
+/// shadow globals by name, the nearest scope wins a name, and every layer in
+/// the chain contributes tool providers.
 struct Registry {
     global: Layer,
     scopes: BTreeMap<String, Layer>,
+    /// Child scope to its enclosing scope. Only ever written through
+    /// [`SystemPrompt::bind_scope_parent`], whose cycle check is what keeps
+    /// every chain walk finite.
+    parents: BTreeMap<String, String>,
+    /// `system-prompt/change` subscribers, notified on every registration
+    /// and every disposal.
+    change_listeners: Vec<(Rc<()>, ChangeListener)>,
+    /// `system-prompt/assemble` waterfall listeners with the scope tag they
+    /// were registered under; `None` means the listener is untagged and
+    /// receives every scope's assemblies.
+    assemble_listeners: Vec<(Option<String>, Rc<()>, AssembleListener)>,
     tool_order: Option<Vec<String>>,
 }
 
@@ -140,6 +174,63 @@ impl Registry {
         match scope {
             None => Some(&mut self.global),
             Some(scope) => self.scopes.get_mut(scope),
+        }
+    }
+
+    /// A scope's ancestry, nearest first: `[scope, parent, grandparent, ..]`.
+    ///
+    /// This is TypeScript's `scopeChainOf`. It is the one relation the
+    /// scope package owns: registration views inherit DOWN the chain (a child
+    /// scope sees its ancestors' layers), while event admission extends UP it
+    /// (a listener tagged with an ancestor receives a descendant's events) —
+    /// see [`SystemPrompt::assemble_listeners_for`].
+    fn scope_chain(&self, scope: &str) -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut cursor = Some(scope.to_string());
+        while let Some(key) = cursor {
+            chain.push(key.clone());
+            cursor = self.parents.get(&key).cloned();
+        }
+        chain
+    }
+
+    /// Existing layers along the scope's ancestry, farthest ancestor first
+    /// and the exact scope last, so a caller layering them in order gives
+    /// the nearest scope the final word. Absent overlays are skipped.
+    fn chain_layers(&self, scope: Option<&str>) -> Vec<&Layer> {
+        let Some(scope) = scope else {
+            return Vec::new();
+        };
+        self.scope_chain(scope)
+            .iter()
+            .rev()
+            .filter_map(|key| self.scopes.get(key))
+            .collect()
+    }
+
+    /// The same chain as [`Registry::chain_layers`], as keys.
+    ///
+    /// Callers that must release the registry borrow between steps — the
+    /// variable walk, which runs a provider per entry — cannot hold the
+    /// layer references across the gap, so they re-look-up by key instead.
+    fn chain_layer_keys(&self, scope: Option<&str>) -> Vec<String> {
+        let Some(scope) = scope else {
+            return Vec::new();
+        };
+        self.scope_chain(scope)
+            .into_iter()
+            .rev()
+            .filter(|key| self.scopes.contains_key(key))
+            .collect()
+    }
+
+    /// Drop a scoped layer that drained, the way TypeScript's disposer
+    /// reclaims an empty aggregate layer.
+    fn reclaim_if_empty(&mut self, scope: Option<&str>) {
+        let Some(scope) = scope else { return };
+        let drained = self.scopes.get(scope).is_some_and(|layer| layer.is_empty());
+        if drained {
+            self.scopes.remove(scope);
         }
     }
 }
@@ -166,6 +257,13 @@ enum RegistrationKind {
     Suppressor {
         scope: Option<String>,
     },
+    ChangeListener {
+        token: Rc<()>,
+    },
+    AssembleListener {
+        scope: Option<String>,
+        token: Rc<()>,
+    },
 }
 
 /// A live prompt registration; dropping it removes the contribution, the
@@ -190,49 +288,113 @@ impl fmt::Debug for Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        let mut registry = self.registry.borrow_mut();
+        let scope = self.scope().cloned();
+        // Every arm removes its entry inside a block, so the registry borrow
+        // is released before the removed value is dropped: a provider may
+        // hold another registration into this same registry, and dropping it
+        // under the borrow would re-enter `borrow_mut`.
         match &self.kind {
-            RegistrationKind::Section { scope, name } => release(
-                registry
-                    .layer_mut(scope.as_deref())
-                    .and_then(|layer| take_named(&mut layer.sections, name)),
-                registry,
-            ),
-            RegistrationKind::Context { scope, name } => release(
-                registry
-                    .layer_mut(scope.as_deref())
-                    .and_then(|layer| take_named(&mut layer.contexts, name)),
-                registry,
-            ),
-            RegistrationKind::Variable { scope, name } => release(
-                registry
-                    .layer_mut(scope.as_deref())
-                    .and_then(|layer| layer.variables.remove(name)),
-                registry,
-            ),
-            RegistrationKind::ToolProvider { scope, token } => release(
-                registry
-                    .layer_mut(scope.as_deref())
-                    .and_then(|layer| take_token(&mut layer.tool_providers, token)),
-                registry,
-            ),
+            RegistrationKind::Section { scope, name } => {
+                let removed = {
+                    let mut registry = self.registry.borrow_mut();
+                    registry
+                        .layer_mut(scope.as_deref())
+                        .and_then(|layer| take_named(&mut layer.sections, name))
+                };
+                drop(removed);
+            }
+            RegistrationKind::Context { scope, name } => {
+                let removed = {
+                    let mut registry = self.registry.borrow_mut();
+                    registry
+                        .layer_mut(scope.as_deref())
+                        .and_then(|layer| take_named(&mut layer.contexts, name))
+                };
+                drop(removed);
+            }
+            RegistrationKind::Variable { scope, name } => {
+                let removed = {
+                    let mut registry = self.registry.borrow_mut();
+                    registry
+                        .layer_mut(scope.as_deref())
+                        .and_then(|layer| layer.variables.remove(name))
+                };
+                drop(removed);
+            }
+            RegistrationKind::ToolProvider { scope, token } => {
+                let removed = {
+                    let mut registry = self.registry.borrow_mut();
+                    registry
+                        .layer_mut(scope.as_deref())
+                        .and_then(|layer| take_token(&mut layer.tool_providers, token))
+                };
+                drop(removed);
+            }
             RegistrationKind::Suppressor { scope } => {
+                let mut registry = self.registry.borrow_mut();
                 if let Some(layer) = registry.layer_mut(scope.as_deref()) {
                     layer.suppressors = layer.suppressors.saturating_sub(1);
                 }
             }
+            RegistrationKind::ChangeListener { token } => {
+                let removed = {
+                    let mut registry = self.registry.borrow_mut();
+                    take_token(&mut registry.change_listeners, token)
+                };
+                drop(removed);
+            }
+            RegistrationKind::AssembleListener { token, .. } => {
+                let removed = {
+                    let mut registry = self.registry.borrow_mut();
+                    let position = registry
+                        .assemble_listeners
+                        .iter()
+                        .position(|(_, existing, _)| Rc::ptr_eq(existing, token));
+                    position.map(|position| registry.assemble_listeners.remove(position))
+                };
+                drop(removed);
+            }
         }
+        // A drained scoped layer is reclaimed, then one change notification
+        // is emitted for this disposal — TypeScript's `ScopedLayers.effect`
+        // disposer does the same two things in the same order.
+        {
+            let mut registry = self.registry.borrow_mut();
+            registry.reclaim_if_empty(scope.as_deref());
+        }
+        self.emit_change();
     }
 }
 
-/// Drop a removed entry only after its registry borrow is released.
-///
-/// A provider closure can hold another registration into this same
-/// registry — the self-replacing-variable pattern — and dropping it
-/// under the borrow would re-enter `borrow_mut` on a cell already held.
-fn release<T>(removed: Option<T>, registry: RefMut<'_, Registry>) {
-    drop(registry);
-    drop(removed);
+impl Registration {
+    /// The scope this registration was made under, when it belongs to one.
+    fn scope(&self) -> Option<&String> {
+        match &self.kind {
+            RegistrationKind::Section { scope, .. }
+            | RegistrationKind::Context { scope, .. }
+            | RegistrationKind::Variable { scope, .. }
+            | RegistrationKind::ToolProvider { scope, .. }
+            | RegistrationKind::Suppressor { scope }
+            | RegistrationKind::AssembleListener { scope, .. } => scope.as_ref(),
+            RegistrationKind::ChangeListener { .. } => None,
+        }
+    }
+
+    /// Notify every `system-prompt/change` subscriber that one registration
+    /// changed, without holding the registry borrow while they run.
+    fn emit_change(&self) {
+        let listeners: Vec<ChangeListener> = {
+            let registry = self.registry.borrow();
+            registry
+                .change_listeners
+                .iter()
+                .map(|(_, listener)| Rc::clone(listener))
+                .collect()
+        };
+        for listener in listeners {
+            listener();
+        }
+    }
 }
 
 /// Remove the one live entry with this name, if present.
@@ -241,15 +403,53 @@ fn take_named<T>(entries: &mut Vec<(String, T)>, name: &str) -> Option<(String, 
     Some(entries.remove(position))
 }
 
-/// Remove the one provider carrying this identity token, if present.
-fn take_token(
-    providers: &mut Vec<(Rc<()>, ToolProvider)>,
-    token: &Rc<()>,
-) -> Option<(Rc<()>, ToolProvider)> {
+/// Remove the one anonymous entry carrying this identity token, if present.
+fn take_token<T>(providers: &mut Vec<(Rc<()>, T)>, token: &Rc<()>) -> Option<(Rc<()>, T)> {
     let position = providers
         .iter()
         .position(|(existing, _)| Rc::ptr_eq(existing, token))?;
     Some(providers.remove(position))
+}
+
+/// The privileged handle to move one scope's parent link.
+///
+/// TypeScript grants re-linking only to the original binder, and only "while
+/// nothing produced under the old parent is retained" — the blank-session
+/// recompose contract — because the relation cannot see what a session
+/// logged. The same restriction holds here: there is no public re-bind.
+pub struct ScopeParentBinding {
+    registry: Rc<RefCell<Registry>>,
+    child: String,
+}
+
+impl ScopeParentBinding {
+    /// Re-link the bound scope to a different parent, with the same cycle
+    /// check as the bind.
+    ///
+    /// Returns `false` when the link would form a cycle; the existing link is
+    /// then left in place.
+    pub fn rebind(&self, parent: &str) -> bool {
+        let mut registry = self.registry.borrow_mut();
+        let mut cursor = Some(parent.to_string());
+        while let Some(key) = cursor {
+            if key == self.child {
+                return false;
+            }
+            cursor = registry.parents.get(&key).cloned();
+        }
+        registry
+            .parents
+            .insert(self.child.clone(), parent.to_string());
+        true
+    }
+}
+
+impl fmt::Debug for ScopeParentBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScopeParentBinding")
+            .field("child", &self.child)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Registry service for the prompt inputs assembled before each model step.
@@ -308,9 +508,175 @@ impl SystemPrompt {
             registry: Rc::new(RefCell::new(Registry {
                 global,
                 scopes: BTreeMap::new(),
+                parents: BTreeMap::new(),
+                change_listeners: Vec::new(),
+                assemble_listeners: Vec::new(),
                 tool_order,
             })),
         })
+    }
+
+    /// Bind `parent` as `child`'s enclosing scope, once.
+    ///
+    /// A child that already has a parent fails: TypeScript has no open
+    /// re-link path, so a scope's ancestry can only be moved by whoever
+    /// holds the [`ScopeParentBinding`] returned here. A link that would
+    /// close a cycle is rejected, because every chain consumer walks
+    /// parents to the root and would never terminate.
+    ///
+    /// In TypeScript this relation belongs to `@deepseek-ai/dsh-scope` and
+    /// keys are opaque objects; here a scope is a `String`, so the same
+    /// relation is a name-to-name map.
+    pub fn bind_scope_parent(
+        &self,
+        child: &str,
+        parent: &str,
+    ) -> Result<ScopeParentBinding, PromptError> {
+        let mut registry = self.registry.borrow_mut();
+        if registry.parents.contains_key(child) {
+            return Err(PromptError::ScopeParentBound);
+        }
+        // Walk up from the prospective parent: reaching the child means the
+        // link would close a cycle.
+        let mut cursor = Some(parent.to_string());
+        while let Some(key) = cursor {
+            if key == child {
+                return Err(PromptError::ScopeParentCycle);
+            }
+            cursor = registry.parents.get(&key).cloned();
+        }
+        registry
+            .parents
+            .insert(child.to_string(), parent.to_string());
+        Ok(ScopeParentBinding {
+            registry: Rc::clone(&self.registry),
+            child: child.to_string(),
+        })
+    }
+
+    /// A scope's ancestry, nearest first: `[scope, parent, grandparent, ..]`.
+    ///
+    /// Registration views inherit DOWN this chain — a child scope sees its
+    /// ancestors' layers — while event admission extends UP it.
+    pub fn scope_chain(&self, scope: &str) -> Vec<String> {
+        self.registry.borrow().scope_chain(scope)
+    }
+
+    /// Subscribe to `system-prompt/change`.
+    ///
+    /// The notification carries no payload, exactly as the TypeScript event
+    /// takes no arguments: it only says "a prompt provider changed", and it
+    /// is unfiltered because a global change affects every scope.
+    pub fn on_change(&self, listener: impl Fn() + 'static) -> Registration {
+        let token = Rc::new(());
+        self.registry
+            .borrow_mut()
+            .change_listeners
+            .push((Rc::clone(&token), Rc::new(listener)));
+        Registration {
+            registry: Rc::clone(&self.registry),
+            kind: RegistrationKind::ChangeListener { token },
+        }
+    }
+
+    /// Register an untagged `system-prompt/assemble` waterfall listener.
+    ///
+    /// An untagged listener receives every scope's assemblies; a listener
+    /// registered through [`SystemPrompt::on_assemble_in`] receives only
+    /// assemblies for its own scope and its descendants, because events flow
+    /// up the scope chain and never down.
+    pub fn on_assemble(&self, listener: AssembleListener) -> Registration {
+        self.insert_assemble_listener(None, listener)
+    }
+
+    /// Register an `system-prompt/assemble` waterfall listener owned by one
+    /// scope: it receives assemblies dispatched to that scope or to any
+    /// scope nested under it.
+    pub fn on_assemble_in(&self, scope: &str, listener: AssembleListener) -> Registration {
+        self.insert_assemble_listener(Some(scope.to_string()), listener)
+    }
+
+    fn insert_assemble_listener(
+        &self,
+        scope: Option<String>,
+        listener: AssembleListener,
+    ) -> Registration {
+        let token = Rc::new(());
+        self.registry.borrow_mut().assemble_listeners.push((
+            scope.clone(),
+            Rc::clone(&token),
+            listener,
+        ));
+        Registration {
+            registry: Rc::clone(&self.registry),
+            kind: RegistrationKind::AssembleListener { scope, token },
+        }
+    }
+
+    /// The waterfall listeners admitted for one scope, in registration
+    /// order: untagged listeners, then those tagged with the scope itself or
+    /// with any of its ancestors.
+    fn assemble_listeners_for(&self, scope: Option<&str>) -> Vec<AssembleListener> {
+        let registry = self.registry.borrow();
+        let chain: Vec<String> = match scope {
+            None => Vec::new(),
+            Some(scope) => registry.scope_chain(scope),
+        };
+        registry
+            .assemble_listeners
+            .iter()
+            .filter(|(tag, _, _)| match tag {
+                None => true,
+                Some(tag) => scope == Some(tag.as_str()) || chain.iter().any(|key| key == tag),
+            })
+            .map(|(_, _, listener)| Rc::clone(listener))
+            .collect()
+    }
+
+    /// Dispose every registration owned by one scope's layer at once.
+    ///
+    /// This is the Rust shape of disposing a scope's Cordis fiber: the
+    /// layer's entries are removed together and the (now empty) layer is
+    /// reclaimed. One `system-prompt/change` notification is emitted per
+    /// removed entry, because TypeScript's each-disposer-once rule makes the
+    /// count observable to a host that records the notifications.
+    ///
+    /// Returns how many entries were removed.
+    pub fn dispose_scope(&self, scope: &str) -> usize {
+        let removed = {
+            let mut registry = self.registry.borrow_mut();
+            let Some(layer) = registry.scopes.remove(scope) else {
+                return 0;
+            };
+            layer.sections.len()
+                + layer.contexts.len()
+                + layer.variables.slots.iter().flatten().count()
+                + layer.tool_providers.len()
+                + layer.suppressors
+        };
+        for _ in 0..removed {
+            self.emit_change();
+        }
+        removed
+    }
+
+    /// Notify every `system-prompt/change` subscriber.
+    ///
+    /// The listener list is snapshotted and the borrow released before any
+    /// listener runs, so a subscriber may register, dispose, or assemble
+    /// without re-entering the registry.
+    fn emit_change(&self) {
+        let listeners: Vec<ChangeListener> = {
+            let registry = self.registry.borrow();
+            registry
+                .change_listeners
+                .iter()
+                .map(|(_, listener)| Rc::clone(listener))
+                .collect()
+        };
+        for listener in listeners {
+            listener();
+        }
     }
 
     /// Resolve the centrally owned placement of a repository prompt section.
@@ -357,6 +723,10 @@ impl SystemPrompt {
             });
         }
         layer.sections.push((name.clone(), section));
+        drop(registry);
+        // One notification per registration, as `ScopedLayers.effect` does
+        // after a successful action.
+        self.emit_change();
         Ok(Registration {
             registry: Rc::clone(&self.registry),
             kind: RegistrationKind::Section {
@@ -399,6 +769,8 @@ impl SystemPrompt {
             });
         }
         layer.contexts.push((name.clone(), context));
+        drop(registry);
+        self.emit_change();
         Ok(Registration {
             registry: Rc::clone(&self.registry),
             kind: RegistrationKind::Context {
@@ -456,6 +828,8 @@ impl SystemPrompt {
                 },
             });
         }
+        drop(registry);
+        self.emit_change();
         Ok(Registration {
             registry: Rc::clone(&self.registry),
             kind: RegistrationKind::Variable {
@@ -495,6 +869,8 @@ impl SystemPrompt {
             .layer_for_insert(scope)
             .tool_providers
             .push((Rc::clone(&token), Rc::new(provider)));
+        drop(registry);
+        self.emit_change();
         Registration {
             registry: Rc::clone(&self.registry),
             kind: RegistrationKind::ToolProvider {
@@ -520,6 +896,8 @@ impl SystemPrompt {
     fn insert_suppressor(&self, scope: Option<&str>) -> Registration {
         let mut registry = self.registry.borrow_mut();
         registry.layer_for_insert(scope).suppressors += 1;
+        drop(registry);
+        self.emit_change();
         Registration {
             registry: Rc::clone(&self.registry),
             kind: RegistrationKind::Suppressor {
@@ -528,27 +906,33 @@ impl SystemPrompt {
         }
     }
 
-    /// Assemble global and scoped providers, detach tool parameters, and
-    /// apply canonical ordering.
+    /// Assemble global and scoped providers, detach tool parameters, apply
+    /// canonical ordering, then run the assembly waterfall.
     ///
-    /// This is the TypeScript `assemble()` up to the waterfall: variables
-    /// resolve with scoped shadowing, sections and contexts resolve with
-    /// scoped shadowing and order sorting, tools canonicalize against the
-    /// configured order, and a single effective `complete` section becomes
-    /// the sole prompt. The post-waterfall restorations (a complete section
-    /// replacing whatever the waterfall produced; required-only contexts
-    /// under suppression) are folded in, because without a waterfall the
-    /// registry's own output already satisfies them.
+    /// This is the whole TypeScript `assemble()`: variables resolve with
+    /// scope-chain shadowing (the nearest scope wins a name), sections and
+    /// contexts resolve with the same shadowing before the deterministic
+    /// order sort, tools canonicalize against the configured order, and the
+    /// cooperative waterfall runs on the result.
+    ///
+    /// The waterfall's value is authoritative except for two restorations
+    /// TypeScript applies afterwards: an effective `complete` section is put
+    /// back as the sole prompt section — listeners cannot add to or replace
+    /// a complete prompt — and, under runtime-context suppression, contexts
+    /// are cut back to the required ones, which drops any context the
+    /// waterfall added.
     pub fn assemble(&self, context: &AssembleContext) -> Result<PromptAssembly, PromptError> {
         let scope = context.scope.as_deref();
         let tool_order = self.registry.borrow().tool_order.clone();
+        let chain_keys = self.registry.borrow().chain_layer_keys(scope);
         let suppressed = is_suppressed(&self.registry, scope);
 
         // Scoped variables shadow globals; the map keeps one value per name.
+        // The chain runs farthest ancestor first, so the nearest scope wins.
         let mut variables = PromptVariables::default();
         evaluate_variables(&self.registry, None, context, &mut variables);
-        if let Some(scope) = scope {
-            evaluate_variables(&self.registry, Some(scope), context, &mut variables);
+        for key in &chain_keys {
+            evaluate_variables(&self.registry, Some(key), context, &mut variables);
         }
 
         // Scoped sections and contexts shadow globals before the
@@ -600,6 +984,16 @@ impl SystemPrompt {
             sections.push(assembled);
         }
 
+        // The required names come from the merged map, not the filtered
+        // list: suppression is what the post-waterfall cut-back re-applies,
+        // and a required context added by the waterfall is not one of them.
+        let required_contexts: BTreeSet<String> = context_defs
+            .iter()
+            .map(|(_, entry)| entry)
+            .filter(|entry| entry.required)
+            .map(|entry| entry.name.clone())
+            .collect();
+
         let mut contexts: Vec<&PromptContext> = context_defs
             .iter()
             .map(|(_, entry)| entry)
@@ -613,16 +1007,36 @@ impl SystemPrompt {
 
         let tools = order_tools(&collected, tool_order.as_deref(), &known_names)?;
 
-        let mut assembly = PromptAssembly {
+        let assembly = PromptAssembly {
             sections,
             contexts,
             tools,
             variables,
         };
-        if let Some(complete_section) = complete_section {
-            assembly.sections = vec![complete_section];
+
+        // The waterfall runs on the assembled value; its result is
+        // authoritative, then TypeScript's two restorations are applied.
+        let listeners = self.assemble_listeners_for(scope);
+        let transformed = run_assemble_waterfall(&listeners, context, assembly);
+        if complete_section.is_none() && !suppressed {
+            return Ok(transformed);
         }
-        Ok(assembly)
+        Ok(PromptAssembly {
+            sections: match &complete_section {
+                Some(complete_section) => vec![complete_section.clone()],
+                None => transformed.sections,
+            },
+            contexts: if suppressed {
+                transformed
+                    .contexts
+                    .into_iter()
+                    .filter(|entry| required_contexts.contains(&entry.name))
+                    .collect()
+            } else {
+                transformed.contexts
+            },
+            ..transformed
+        })
     }
 
     /// Refresh accepted registered runtime facts for request admission.
@@ -682,14 +1096,19 @@ impl SystemPrompt {
 }
 
 /// Whether optional runtime context is suppressed for this scope.
+///
+/// Any layer in the chain can suppress: the global layer, or any ancestor
+/// overlay — TypeScript tests `global.runtimeContextSuppressors` and then
+/// every chained layer.
 fn is_suppressed(registry: &Rc<RefCell<Registry>>, scope: Option<&str>) -> bool {
     let registry = registry.borrow();
     if registry.global.suppressors > 0 {
         return true;
     }
-    scope
-        .and_then(|scope| registry.scopes.get(scope))
-        .is_some_and(|layer| layer.suppressors > 0)
+    registry
+        .chain_layers(scope)
+        .iter()
+        .any(|layer| layer.suppressors > 0)
 }
 
 /// Evaluate one layer's variables the way TypeScript iterates its live
@@ -750,11 +1169,13 @@ fn layer_ref<'a>(registry: &'a Registry, scope: Option<&str>) -> Option<&'a Laye
     }
 }
 
-/// Merge one layer's named entries with the scope layer's, scoped entries
-/// shadowing globals by name while keeping the global position.
+/// Merge the global layer's named entries with every scope-chain layer's,
+/// scoped entries shadowing globals by name while keeping the global
+/// position.
 ///
 /// That is `Map.set` semantics: overwriting a key does not move it, which
-/// is what makes the later stable order sort deterministic.
+/// is what makes the later stable order sort deterministic. The chain is
+/// walked farthest ancestor first, so the nearest scope's entry wins.
 fn merged_entries<T: Clone>(
     registry: &Rc<RefCell<Registry>>,
     scope: Option<&str>,
@@ -762,13 +1183,11 @@ fn merged_entries<T: Clone>(
 ) -> Vec<(String, T)> {
     let registry = registry.borrow();
     let mut merged = pick(&registry.global).to_vec();
-    if let Some(scope) = scope {
-        if let Some(layer) = registry.scopes.get(scope) {
-            for (name, entry) in pick(layer) {
-                match merged.iter_mut().find(|(existing, _)| existing == name) {
-                    Some(slot) => slot.1 = entry.clone(),
-                    None => merged.push((name.clone(), entry.clone())),
-                }
+    for layer in registry.chain_layers(scope) {
+        for (name, entry) in pick(layer) {
+            match merged.iter_mut().find(|(existing, _)| existing == name) {
+                Some(slot) => slot.1 = entry.clone(),
+                None => merged.push((name.clone(), entry.clone())),
             }
         }
     }
@@ -776,7 +1195,8 @@ fn merged_entries<T: Clone>(
 }
 
 /// Snapshot tool-provider membership for one assembly: global providers
-/// first, then the scope's, in registration order.
+/// first, then every chained scope layer's, farthest ancestor first, in
+/// registration order. Every layer in the chain contributes.
 fn tool_provider_snapshot(
     registry: &Rc<RefCell<Registry>>,
     scope: Option<&str>,
@@ -788,15 +1208,13 @@ fn tool_provider_snapshot(
         .iter()
         .map(|(_, provider)| Rc::clone(provider))
         .collect();
-    if let Some(scope) = scope {
-        if let Some(layer) = registry.scopes.get(scope) {
-            providers.extend(
-                layer
-                    .tool_providers
-                    .iter()
-                    .map(|(_, provider)| Rc::clone(provider)),
-            );
-        }
+    for layer in registry.chain_layers(scope) {
+        providers.extend(
+            layer
+                .tool_providers
+                .iter()
+                .map(|(_, provider)| Rc::clone(provider)),
+        );
     }
     providers
 }

@@ -21,10 +21,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod backend;
 pub mod brand;
 pub mod checkpoint;
+pub mod command;
 pub mod error;
 pub mod events;
+pub mod lock;
 pub mod pairing;
 pub mod policy;
 pub mod prune;
@@ -32,9 +35,15 @@ pub mod state;
 pub mod surface;
 
 pub use brand::{CommandId, CompactionId};
+pub use backend::{
+    frame_summary, LlmSummarizationBackend, SummarizationBackend, SummarizationInput, SummaryResult,
+};
 pub use checkpoint::{
     compact_checkpoint_source, is_compact_checkpoint_source, CompactionCheckpointSource,
     COMPACT_CHECKPOINT_KIND,
+};
+pub use command::{
+    compact, should_compact, resolve_retain_tokens, CompactOptions, CompactPlan, CompactionService,
 };
 pub use error::{
     CompactionError, ConfigError, PruneError, SurfaceError, TargetPressureConfigError,
@@ -45,6 +54,7 @@ pub use events::{
     CompactionSummary, CompactionTurn, ShadowedRange, COMPACTION_END_TAG, COMPACTION_EVENT_TAGS,
     COMPACTION_PRUNE_TAG, COMPACTION_START_TAG, COMPACTION_SUMMARY_TAG,
 };
+pub use lock::{acquire_lock, inspect_lock, release_lock, LockState, DEFAULT_LEASE_MS};
 pub use pairing::{tool_pairing_balanced_after, tool_pairing_balanced_before, ToolPairing};
 pub use policy::{
     compaction_attempt_limit, conversation_target, overflow_compaction_allowed,

@@ -14,12 +14,19 @@
 
 #![forbid(unsafe_code)]
 
+pub mod approval;
 pub mod cancel;
 pub mod gate;
 pub mod registry;
 pub mod schedule;
 pub mod types;
 
+pub use approval::{
+    await_approval, resolve_approval, AllowListener, ApprovalListener, ApprovalRequest,
+    ApprovalResult, ApprovalService, ApprovalVote, ConstApprovalService, DelegateListener,
+    DenyListener, FnApprovalListener, FnApprovalService, PendingApprovalService,
+    WaterfallApprovalService,
+};
 pub use cancel::CancelSignal;
 pub use gate::{
     aborted_before_dispatch_result, admits_all, apply_guard, apply_post_tool, ask_denial_reason,

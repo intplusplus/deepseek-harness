@@ -127,7 +127,7 @@ impl ShadowedRange {
 
 /// Marks the start of one compaction transaction and holds its lock.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompactionStart {
     /// Stable identity shared by the whole start/summary/end transaction.
     pub compaction_id: CompactionId,
@@ -137,6 +137,11 @@ pub struct CompactionStart {
     /// Owning turn, or an explicit `null` between turns.
     #[serde(deserialize_with = "deserialize_required_turn")]
     pub turn: CompactionTurn,
+    /// Epoch milliseconds at which the durable lock was acquired, used for
+    /// lease-expiry recovery. Absent on histories written before lease timing
+    /// was recorded; such a lock is treated as held (never auto-expiring).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquired_at: Option<i64>,
 }
 
 impl CompactionStart {
@@ -150,6 +155,22 @@ impl CompactionStart {
             compaction_id,
             source_command_id,
             turn,
+            acquired_at: None,
+        }
+    }
+
+    /// Create one lock-opening event stamped with its acquisition time.
+    pub fn with_acquired_at(
+        compaction_id: CompactionId,
+        source_command_id: Option<CommandId>,
+        turn: CompactionTurn,
+        acquired_at: i64,
+    ) -> Self {
+        Self {
+            compaction_id,
+            source_command_id,
+            turn,
+            acquired_at: Some(acquired_at),
         }
     }
 }
@@ -298,7 +319,7 @@ impl Serialize for CompactionSummary {
 
 /// Marks the end of a compaction transaction and releases its lock.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompactionEnd {
     /// Transaction identity shared with `compaction/start`.
     pub compaction_id: CompactionId,

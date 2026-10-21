@@ -1,0 +1,25 @@
+[package]
+name = "dsh-provider-deepseek"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DeepSeek HTTP/SSE provider behind the canonical LlmProvider trait"
+
+[dependencies]
+async-trait = { workspace = true }
+dsh-llm = { workspace = true }
+dsh-provider = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+futures-util = { workspace = true }
+bytes = { workspace = true }
+# The provider-neutral error classifier ports the phrase matchers from
+# `packages/llm/llm/src/error.ts` verbatim; hand-rolling them would drift.
+regex = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

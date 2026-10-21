@@ -305,6 +305,8 @@ pub enum SessionError {
         "stored generation v{found} predates the current format v{current}; the migration chain is required"
     )]
     MigrationRequired { found: u32, current: u32 },
+    #[error("session format migration failed: {0}")]
+    Migration(String),
     #[error("stored log is empty")]
     EmptyLog,
     #[error("no stored session generation in directory")]

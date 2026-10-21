@@ -71,6 +71,10 @@ pub enum PromptError {
     },
     #[error("multiple complete prompt sections are active: {names}")]
     MultipleCompleteSections { names: String },
+    #[error("dsh-scope: scope parent link would form a cycle")]
+    ScopeParentCycle,
+    #[error("dsh-scope: scope key is already bound to a parent; re-linking requires the binding returned by the original bind")]
+    ScopeParentBound,
     #[error(
         "malformed prompt variable reference at \"{excerpt}...\" in {kind} \"{owner}\" (references are complete simple {{{{name}}}} groups)"
     )]

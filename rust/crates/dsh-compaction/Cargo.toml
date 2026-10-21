@@ -9,6 +9,10 @@ repository.workspace = true
 [dependencies]
 dsh-llm = { workspace = true }
 dsh-session = { workspace = true }
+dsh-provider = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

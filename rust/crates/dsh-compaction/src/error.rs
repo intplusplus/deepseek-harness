@@ -162,6 +162,9 @@ pub enum CompactionError {
     /// A compaction replacement could not be folded.
     #[error(transparent)]
     Surface(#[from] SurfaceError),
+    /// A compaction extension event failed to encode to the durable log.
+    #[error(transparent)]
+    Encode(#[from] serde_json::Error),
     /// Another compaction transaction still owns the durable lock.
     #[error(
         "{stage}: compaction already in progress; the session compaction lock is already active"
@@ -170,6 +173,12 @@ pub enum CompactionError {
         /// Operation label included in the diagnostic.
         stage: String,
     },
+    /// The summarization provider call failed.
+    #[error("compaction summarization failed: {0}")]
+    SummaryProvider(String),
+    /// Summarization produced no usable text content.
+    #[error("compaction summarization produced no text summary content")]
+    SummaryEmpty,
     /// The priced nodes are not the current positional surface.
     #[error("compaction: token-meter surface does not match the current session surface")]
     TokenMeterSurfaceMismatch,
