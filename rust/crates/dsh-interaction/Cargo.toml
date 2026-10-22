@@ -1,0 +1,22 @@
+[package]
+name = "dsh-interaction"
+description = "User question and approval interaction channels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dsh-agent.workspace = true
+dsh-llm.workspace = true
+dsh-session.workspace = true
+dsh-session-projection.workspace = true
+dsh-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

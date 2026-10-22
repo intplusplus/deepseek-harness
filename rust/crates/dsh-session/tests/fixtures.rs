@@ -16,8 +16,9 @@
 use std::fs;
 
 use dsh_llm::{ContentBlock, MessageId, UserMessage};
+use dsh_session::physical::encode_physical_row;
 use dsh_session::{jsonl, SessionError, SessionEvent, SessionHeader, SESSION_FORMAT_VERSION};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures");
 
@@ -47,9 +48,67 @@ fn read_lines(relative: &str) -> Vec<String> {
 }
 
 /// Rust's bytes for one flat TypeScript projection row, or the decode error.
+///
+/// This renders the *core flat* event — the Rust-native layout that keeps the
+/// `role`, `isError`, and integer-`f64` differences the physical writer closes.
+/// [`the_projection_table_covers_every_row_and_matches_the_documented_bytes`]
+/// pins those differences against the TypeScript bytes.
 fn rust_render(ts_line: &str) -> Result<String, String> {
     let event: SessionEvent = serde_json::from_str(ts_line).map_err(|error| error.to_string())?;
     serde_json::to_string(&event).map_err(|error| error.to_string())
+}
+
+/// Build a Rust [`SessionEvent`] from a TypeScript flat projection row.
+///
+/// The TypeScript `user/message` payload is flat (`id`/`role`/`content`/`source`
+/// at the top level) while the Rust core nests it under `message`; we lift it
+/// into the nested form before deserializing. Every other core event
+/// deserializes directly. Deserializing the projection the same way
+/// [`rust_render`] does keeps the field order the shipped decoder and the byte
+/// comparison expect — round-tripping through a reconstructed physical payload
+/// would reorder the tag and scramble the wire bytes.
+fn event_from_ts_projection(ts_line: &str) -> Result<SessionEvent, String> {
+    let mut value: Value = serde_json::from_str(ts_line).map_err(|error| error.to_string())?;
+    if let Some(map) = value.as_object_mut() {
+        if map
+            .get("type")
+            .and_then(Value::as_str)
+            .map(|tag| tag == "user/message")
+            .unwrap_or(false)
+            && !map.contains_key("message")
+        {
+            let mut message = Map::new();
+            for key in ["id", "role", "content", "source"] {
+                if let Some(field) = map.remove(key) {
+                    message.insert(key.to_string(), field);
+                }
+            }
+            map.insert("message".to_string(), Value::Object(message));
+        }
+    }
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+/// The bytes the physical v4 writer would emit for one TypeScript projection
+/// row, expressed as a flat event so the comparison harness (which feeds a flat
+/// event to the shipped decoder) sees the writer's `data`.
+///
+/// The physical writer closes the three differences the core flat layout keeps:
+/// it stamps `role`, writes `tool/result.isError: false` explicitly, and
+/// normalizes integer-valued `f64`. Routing the report through it is what makes
+/// `compare-rust.mjs` accept every row the Rust writer emits.
+fn rust_physical_render(ts_line: &str) -> Result<String, String> {
+    let event = event_from_ts_projection(ts_line)?;
+    let row = encode_physical_row(&event, 0, 0);
+    let row_map = row.as_object().expect("the physical row is an object");
+    let mut flat = Map::new();
+    flat.insert("type".to_string(), row_map["type"].clone());
+    if let Some(data) = row_map.get("data").and_then(Value::as_object) {
+        for (key, value) in data {
+            flat.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::to_string(&Value::Object(flat)).map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Copy)]
@@ -663,7 +722,7 @@ fn write_comparison_report() {
         let mut rows = Vec::new();
         for (index, ts_line) in projection_lines(scenario).iter().enumerate() {
             let row: Value = serde_json::from_str(ts_line).unwrap();
-            let rust = match rust_render(ts_line) {
+            let rust = match rust_physical_render(ts_line) {
                 Ok(line) => serde_json::json!({ "status": "encoded", "line": line }),
                 Err(message) => serde_json::json!({ "status": "rejected", "message": message }),
             };

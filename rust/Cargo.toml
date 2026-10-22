@@ -30,6 +30,9 @@ dsh-skill = { path = "crates/dsh-skill" }
 dsh-ptc = { path = "crates/dsh-ptc" }
 dsh-ptc-host = { path = "crates/dsh-ptc-host" }
 dsh-session-format-catalog = { path = "crates/dsh-session-format-catalog" }
+dsh-token-meter = { path = "crates/dsh-token-meter" }
+dsh-interaction = { path = "crates/dsh-interaction" }
+dsh-tool-skill = { path = "crates/dsh-tool-skill" }
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 # HTTP/SSE transport for the real DeepSeek provider. `native-tls` uses the

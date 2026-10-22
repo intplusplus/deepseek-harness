@@ -19,13 +19,21 @@ import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { register } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { homedir } from 'node:os'
+
+const USERPROFILE = homedir()
 
 register('./resolve-hook.mjs', import.meta.url)
 const { releasedV4SessionFormatCodec } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const RUST = resolve(HERE, '..')
-const TARGET = resolve(RUST, 'target/agent-fixtures')
+// Build products must live outside the repository: the host backs up every
+// modified file, and a project-local `target/` turns each `.o`/`.rlib`/`.pdb`
+// into a backup copy. See rust/README.md §9.4.
+const TARGET = process.env.CARGO_TARGET_DIR
+  ? resolve(process.env.CARGO_TARGET_DIR, 'agent-fixtures')
+  : resolve(USERPROFILE, '.cache', 'dsh-target', 'agent-fixtures')
 const REPORT = resolve(TARGET, 'fixtures-report.json')
 const SCENARIOS = ['turn-tool-call', 'retry', 'tool-error', 'extension-unicode']
 

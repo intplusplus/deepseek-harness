@@ -28,6 +28,7 @@ pub mod fold;
 pub mod jsonl;
 pub mod log;
 pub mod migration;
+pub mod physical;
 pub mod types;
 
 pub use event::{CoreEvent, ExtensionEvent, SessionEvent, CORE_EVENT_TAGS};
@@ -43,6 +44,11 @@ pub use log::Session;
 pub use migration::{
     detect_version, migrate_session, parse_event_line, v0_to_v1, v1_to_v2, v2_to_v3, v3_to_v4,
     Envelope, Log,
+};
+pub use physical::{
+    decode_physical_header, decode_physical_log, decode_physical_log_with, decode_row,
+    decode_row_with, decode_seq_ranges, encode_physical_header, encode_physical_log,
+    encode_physical_row, encode_seq_ranges, KnownEventTypes, PhysicalRow, PHYSICAL_HEADER_TYPE,
 };
 pub use types::{
     AgentCancelCause, EpochHeader, OptionalSessionSeq, RequestContext, RequestHeaderReason,

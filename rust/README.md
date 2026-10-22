@@ -550,6 +550,9 @@ waterfall 决策 → 其余 fold → 失败加载回滚 → unload → agent 身
 | compaction 接进 agent-loop | ✅ 已完成：step 边界压力检查、overflow 恢复、失败降级、事件顺序不变量（32 tests） |
 | 工具权限的 async 部分 | ✅ 已完成：`ApprovalService`、审批 waterfall、超时与取消追平（`dsh-tools::approval`，75 tests 合计） |
 | PTC 的协议与策略 | ✅ 已完成：事件词汇、帧协议、调用关联、账本、保留名、进程策略（`dsh-ptc` 74 tests） |
+| token-meter（固定估计 + surface fold + route 定价 + turn usage） | ✅ 已完成：`dsh-token-meter`（21 tests）；未搬：`contextPressure`/`contextBreakdown` projection（依赖 surface-op 词汇，见 §11.5）、Cordis 服务与 usage HTTP client |
+| interaction 通道（提问 / 审批 / ask-user） | ✅ 已完成：`dsh-interaction`（90 tests）；未搬：Cordis 生命周期、scope 分派、live-agent 注册表（以注入 seam 表达） |
+| tool-skill（模型侧技能目录与 loader） | ✅ 已完成：`dsh-tool-skill`（26 tests）；未搬：`agent/pre-step` 双监听器接线（以纯函数表达）、working-directory 解析（归注入 seam） |
 | session format 迁移链（v0→v4） | ✅ 已完成：五段链 + 真实样本拒绝断言 + 合成样本端到端 golden |
 | 重试的生命周期 | ✅ 已完成：卸载排空（`RetryLifecycle`/`dispose()`/`Drain`）、always 模式下游协商、`fused_wait` 双源竞速；已接进 `dsh-agent-loop::recover_request`（75 + 43 tests） |
 | PTC 的真实沙箱进程 | ✅ 已完成：`dsh-ptc-host`（36 tests，真实 Node 子进程离线测试）；未搬：sandbox 侧 bootstrap/REPL/类型剥离（属子进程内部）、confine 后端、Electron 打包形态 |
@@ -730,3 +733,120 @@ shadowed seq，少一条前置事件就让整个区间错位一格。
 ### 剩余（§8 已同步）
 
 TS↔Rust 端到端 golden run；宿主装配层（把 dispose/PtcHost/SkillHost 接到统一插件宿主）；工具目录宿主；TUI/IPC。
+
+---
+
+## 11. 本轮并行移植记录（2026-10-22 第三轮）
+
+基线 966 全绿后，本轮目标是一次并行收口 4 个 crate 边界：v4 物理信封、token-meter、
+interaction 通道、tool-skill。过程有反复，最终交付以主 agent 复验为准。
+
+### 11.1 v4 物理信封（`dsh-session::physical`）
+
+主 agent 直接实现（600 行 + 28 tests）。关闭 `fixtures/README.md` Divergences 表 8 项中的 6 项：
+
+- 行信封 `{type, seq, time, data, ignorable?, sourceEventSeqs?, surfaceOp?}` 与 header 判别
+  （`type: "session"`、`version: 4`、`delegationDepth` 必填、`origin` 仅 `subagent`）；
+- `sourceEventSeqs` 区间 codec（单点/`[start,end]` 对、唯一、严格递增、全部早于本行 seq）；
+- 未知事件准入做成可注入的 `KnownEventTypes` trait（core 词汇之外由调用方放行插件事件）；
+- `user/message` 的 TS 扁平 payload ↔ Rust 嵌套 `message` 的提升/摊平。
+
+**真实读入 4 个 TS 写的 golden**（`turn-tool-call` / `retry` / `tool-error` / `extension-unicode`）。
+
+剩余 3 项差异（message `role` 保留、`isError:false` 显式出现、整数 f64 规范化）**未闭合**，
+对应端到端对拍里 2 个 `user/message` 行被 Rust 拒绝（见 §11.4）。
+
+### 11.2 三个新 crate
+
+| crate | 结果 | 说明 |
+| --- | --- | --- |
+| `dsh-token-meter` | 21 tests | 固定密度估计（UTF-16 码元计数）、surface plan/commit 两阶段 fold、route 定价（价格数不匹配 fail loud）、`derive_turn_token_usage` 全有或全无状态机、`tokenUsage` projection |
+| `dsh-interaction` | 90 tests | approval policy 层 + `never` 前置闸门、审计对、user question 服务与校验、`ask_user_question`（legacy/timed）、`userQuestions` projection、注入 `Clock` 的定时等待 |
+| `dsh-tool-skill` | 26 tests | 目录条目规范化（UTF-16 截断）、`<system-reminder>` 双帧渲染、发布记录读取、目录历史 fold、`/name` 手写扫描（无 regex 依赖）、纯 Rust SHA-256（NIST 向量锁）+ `skill` loader 工具 |
+
+### 11.3 并行的实际教训（第三轮）
+
+1. **两个子 agent（token-meter / tool-skill）各空转约 58 分钟零落盘**——任务描述偏"移植整个包"，
+   agent 一直在读基准不落笔。事后看，凡是给了「逐文件 + 逐函数签名」清单的工作都能按时交付；
+   给开放式包级任务的都失败。后续派发应以文件为最小交付单位。
+2. **同路径写入事故复现**：session-v4 agent 与主 agent 同时写 `physical.rs`，agent 版本被覆盖。
+   并行写者必须事前声明文件级所有权，冲突时以磁盘为准。
+3. `cargo clippy --workspace` 会暴露任何 member 的历史 lint —— 本轮顺手修了
+   `dsh-interaction::projection` 两处 `let...else`。
+
+### 11.4 收尾验证（主 agent 独立复跑）
+
+- `cargo test --workspace` → **1131 passed, 0 failed**
+- `cargo clippy --workspace --all-targets -- -D warnings` → 干净
+- `cargo fmt --all -- --check` → 干净
+- `cargo run -p dsh` → 冒烟通过
+- `node --experimental-transform-types rust/fixtures/compare-rust.mjs` → **PASS**
+  （bytes 28 match / 6 documented differences / 0 undocumented；ts-decode 32 pass / 2 fail / 5 skip）
+
+### 11.5 本轮刻意偏离（均已写入 crate 文档）
+
+- `dsh-token-meter::surface_fold`：TS `SurfaceEvent` 的 `surfaceOp` 是核心日志行级字段，
+  Rust core 日志不携带，故由调用方显式传入（`SurfaceOp::Append | Replace`）；
+  `derive_event_message` 在 crate 内实现（含"空 system/developer/assistant 不产消息"规则）。
+- `dsh-token-meter`：`contextPressure` / `contextBreakdown` 两个 projection **未移植**——
+  二者的 fold 逐事件消费 `surfaceOp`，在无 surface-op 词汇的 core 日志上无法忠实重建，
+  静默降级会造成历史回放漂移。待 Rust 侧 surface-op 词汇落地后一并移植。
+- `dsh-token-meter::turn_usage`：`llm/retry` / `llm/retry-started` 直接读扩展事件的
+  `turn`/`step` 字段，避免为两个事件引入 `dsh-retry` 依赖。
+- `dsh-tool-skill`：`SkillHost` 是 `Rc<RefCell>` 单线程宿主，而 `ToolHandler` 要求
+  `Send + Sync`，故 loader 通过注入的 `SkillCatalog` seam 取数；`agent/pre-step` 双监听器
+  拆成纯函数（`invoked_skill_names` + `catalog_history` + 两个渲染函数）由宿主组合；
+  SHA-256 为 crate 内纯实现（构建环境离线，crates.io 不可达）。
+- `dsh-interaction`：审批请求无工具调用时以空 call id 表达 `callId?`；
+  `ApprovalResult::Timeout` 降级为 fail-closed 的 `unavailable`（TS 无此态）。
+
+### 11.6 剩余待办
+
+> 第 1、3 项已在 §11.7（2026-10-22 第四轮并行续做）闭合。
+
+1. ~~v4 物理信封最后 3 项差异~~ → **已闭合**（消息 `role` / `tool/result` 的 `isError:false` / 整数 f64 规范化，见 §11.7.1、§11.7.2；`compare-rust.mjs` 现已全绿）。
+2. `dsh-token-meter` 的 `contextPressure` / `contextBreakdown` projection（依赖 Rust 侧
+   surface-op 词汇，仍未移植 —— 见 §11.5）。
+3. ~~宿主装配层~~ → **已闭合**（`dsh-host` crate，见 §11.7.1）。
+
+---
+
+## 11.7 续做（2026-10-22 第四轮：并行收口信封差异 + 宿主装配）
+
+基线 1131 全绿后，主 agent 先独立复跑确认基线（1131 passed / 0 failed，与 §11.4 一致），
+再按 crate 边界开 2 个并行子 agent（写者互不重叠），最后主 agent 独立集成复验。
+
+### 11.7.1 两个并行子 agent
+
+| 工作流 | 写入边界 | 结果 |
+| --- | --- | --- |
+| v4 物理信封收口 | `dsh-session/src/physical.rs`（仅 WRITER 路径）+ 其测试 | 闭合 §11.6 #1 最后 3 项差异：`user/message` 等消息显式 `role`、非错误 `tool/result` 显式 `isError:false`、整数 f64 规范化（`1.0 → 1`）。核心扁平 `SessionEvent` 序列化字节未动（受 1100+ 测试字节锁定）。`compare-rust.mjs` 由"6 documented / 2 ts-decode fail"变为全绿 |
+| 统一插件宿主装配 | `dsh-host`（新 crate） | 5 tests（LIFO 排空，离线无真实 Node/网络）：`SessionScope` 把 `RetryLifecycle` / `PtcHost` / `PersistentHost` / `SkillHost` / `interaction` 审批与提问服务组合到单一 `dsh-plugin::Scope`，drop 时 LIFO 排空（精确逆序 `skill,question,approval,persistent,ptc,retry`）；复用各宿主自有 teardown，未重实现 |
+
+### 11.7.2 收尾验证（主 agent 独立复跑）
+
+- `cargo test --workspace` → **1136 passed, 0 failed**（基线 1131 + `dsh-host` 新增 5）
+- `cargo clippy --workspace --all-targets -- -D warnings` → 干净（0 warning / 0 error）
+- `cargo fmt --all -- --check` → 干净
+- `node --experimental-transform-types rust/fixtures/compare-rust.mjs` → **PASS**
+  （bytes 39 match / 0 documented differences / 0 undocumented；ts-decode 39 pass / 0 fail / 0 skipped；4 套 fixture 每行 MATCH + PASS）
+
+### 11.7.3 本轮刻意偏离（均已写入 crate 文档）
+
+- `dsh-session::physical` WRITER：仅向物理写入路径注入 `role` / `isError:false` / f64 规范化，
+  核心 `SessionEvent` 扁平序列化保持 Rust 原生（reader 仍同时接受两种形态）。`physical.rs`
+  模块文档 scope 表已把这两项从"not modelled"改为"emitted by the writer"。
+- `dsh-host`：`SkillHost` 为 `Rc<RefCell>`（`!Send`），无法进入 kernel 的 `Send` effect 列表，
+  故 `SessionScope` 同为 `!Send`；异步排空（retry / persistent）在 `Drop` 内同步触发
+  abort/cancel 后交由 `tokio::runtime::Handle::try_current()` 派发 await（无 runtime 时 no-op），
+  保持 `Drop` infallible 且 `Send`。最小 seam（`Arc<Mutex>` 后端或仅 `Send` 组合省略 `mount_skill`）
+  记录在 `scope.rs` 模块文档，未越界修改 `dsh-skill`。
+
+### 11.7.4 剩余待办
+
+1. `dsh-token-meter` 的 `contextPressure` / `contextBreakdown` projection（依赖 Rust 侧
+   surface-op 词汇，仍未移植 —— 见 §11.5）。
+2. 工具目录宿主（tool-catalog host）未搬。
+3. TUI / IPC / 桌面壳（语言无关，最低优先级）。
+4. 端到端互操作：TS 工作区对 Rust 产物的运行时回读（需要可运行的 TS 工作区，§3.19 已注明）。
+4. TS↔Rust 端到端 golden run（§6 #3）。

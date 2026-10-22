@@ -6,7 +6,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, resolve as resolvePath } from 'node:path'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const REPO = resolvePath(HERE, '../..')
+// The TypeScript monorepo lives under `origin/`; the Rust rewrite lives
+// beside it under `rust/`. Both are subdirectories of the repository root,
+// so the sources are two levels up from `rust/fixtures/` and then into
+// `origin/`.
+const REPO = resolvePath(HERE, '../../origin')
 const SESSION = resolvePath(REPO, 'packages/session')
 
 const MAP = new Map([

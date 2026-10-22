@@ -1,0 +1,23 @@
+[package]
+name = "dsh-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dsh-plugin = { workspace = true }
+dsh-retry = { workspace = true }
+dsh-ptc-host = { workspace = true }
+dsh-skill = { workspace = true }
+dsh-interaction = { workspace = true }
+dsh-tools = { workspace = true }
+dsh-agent = { workspace = true }
+dsh-session = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }
